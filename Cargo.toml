@@ -8,15 +8,15 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/yaroher/nanostores.rs"
 
 [workspace.dependencies]
-nanostores-macros = { version = "1.0.0", path = "crates/nanostores-macros" }
-nanostores = { version = "1.0.0", path = "crates/nanostores" }
-nanostores-wasm = { version = "1.0.0", path = "crates/nanostores-wasm" }
+nanostores-macros = { version = "1.0.1", path = "crates/nanostores-macros" }
+nanostores = { version = "1.0.1", path = "crates/nanostores" }
+nanostores-wasm = { version = "1.0.1", path = "crates/nanostores-wasm" }
 proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", features = ["derive"] }
