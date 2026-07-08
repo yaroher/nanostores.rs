@@ -97,6 +97,7 @@ release:
 	  sed -i "/^nanostores/s/version = \"$$old\"/version = \"$$new\"/g" Cargo.toml
 	  cargo check --workspace --quiet
 	  npm version "$$new" --workspaces --include-workspace-root --no-git-tag-version
+	  npm install --package-lock-only --silent
 	}
 
 	case "$$action" in

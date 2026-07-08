@@ -1,6 +1,6 @@
 {
   "name": "browser-app-ui",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
   "dependencies": {
     "@nanostores/preact": "^1.1.0",
     "nanostores": "^1.4.0",
-    "nanostores-wasm": "0.1.0",
+    "nanostores-wasm": "*",
     "preact": "^10.29.6",
     "vite": "^7.3.0"
   },
