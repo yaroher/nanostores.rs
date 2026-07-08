@@ -11,6 +11,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
+wasm-bindgen-futures = "0.4"
 nanostores.workspace = true
 nanostores-wasm.workspace = true
 serde.workspace = true

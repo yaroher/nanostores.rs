@@ -78,7 +78,7 @@ TS  $count.set(5)
 |---|---|
 | `crates/nanostores` | core: `atom`, `map`, `computed`, `batched`, lifecycle hooks, scheduler |
 | `crates/nanostores-macros` | `#[derive(NanoMap)]` — string-keyed field access + typed per-field setters |
-| `crates/nanostores-wasm` | wasm-bindgen bridge: type-erased handles, `export_stores!`, microtask scheduler |
+| `crates/nanostores-wasm` | wasm-bindgen bridge: type-erased handles, `define_stores!` / `export_stores!`, microtask scheduler |
 | `packages/nanostores-wasm` (npm) | TS glue: `projectAtom` / `projectMap` / `projectReadable` / `projectStores` + wrapper generator |
 | `examples/browser-app` | wasm core + Vite/Preact UI demo |
 
@@ -153,34 +153,50 @@ legal. `batched` defers recomputes through a global `Scheduler`:
   own with `nanostores::set_scheduler`, drain manually with
   `nanostores::flush()` (deterministic tests),
 - in the browser the bridge installs a `queueMicrotask` scheduler
-  automatically — exact JS `batched` semantics.
+  automatically — exact JS `batched` semantics. The bridge uses
+  `set_scheduler_if_unset`, so an explicitly set application scheduler is
+  never overridden.
+
+Concurrency guarantees: writes are ordered by a per-store sequence;
+notifications are delivered through a per-store queue by one thread at a
+time, in write order, and a notification superseded by a newer already
+delivered write is dropped — listeners never observe values rewinding.
+Deferred `computed` recomputes are per-thread (a notification stack on one
+thread does not absorb work triggered on another).
 
 ## Wasm bridge
 
-Define state in your wasm crate and export it with `export_stores!`:
+Define and export state in your wasm crate with `define_stores!` — it
+generates the statics, per-store accessor functions, and the JS export in one
+block; later stores may reference earlier ones through their accessors:
 
 ```rust
-use nanostores::{atom, computed, map, Atom, Computed, MapStore, NanoMap};
-use std::sync::LazyLock;
+use nanostores::{batched, computed, NanoMap};
 
-static COUNT: LazyLock<Atom<i64>> = LazyLock::new(|| atom(0));
-static USER: LazyLock<MapStore<User>> = LazyLock::new(|| map(User::default()));
-
-nanostores_wasm::export_stores! {
+nanostores_wasm::define_stores! {
     pub fn stores() -> StoreHandles {
-        atom count: i64 = LazyLock::force(&COUNT);
-        map user: User = LazyLock::force(&USER);
-        readable doubled: i64 = LazyLock::force(&DOUBLED);
+        atom count: i64 = 0;
+        map user: User = User::default();
+        readable doubled: i64 = computed((count().clone(),), |v| v * 2);
+        readable summary: String = batched((count().clone(), user().clone()), summary_text);
     }
 }
 
 // Rust-initiated mutations reach the UI reactively too:
 #[wasm_bindgen]
 pub fn increment() {
-    let count = LazyLock::force(&COUNT);
-    count.set(count.get() + 1);
+    count().set(count().get() + 1);
 }
 ```
+
+**Custom value types must derive `tsify::Tsify`** (with the `js` feature):
+the generated `.d.ts` references the type by name, and without a
+Tsify-emitted interface the TypeScript build breaks. Primitives (`i64`,
+`String`, `bool`, ...) need nothing.
+
+If your store statics already exist, the lower-level `export_stores!` takes
+expressions instead of definitions (same body syntax, `= <expr>;` on the
+right).
 
 The macro emits the typed `.d.ts` contract (`StoreHandles`, `StoreKinds`,
 `ProjectedStoreHandles`). After `wasm-pack build`, generate the app-side
@@ -213,6 +229,25 @@ You can also project stores manually without the macro:
 `projectReadable` / `projectMap` / `projectStores` from the
 `nanostores-wasm` npm package.
 
+### Async actions
+
+Rust `async fn`s exported via wasm-bindgen compose naturally: await anything
+(fetch, timers), write to stores at the end — projections update reactively
+when the write lands.
+
+```rust
+#[wasm_bindgen]
+pub async fn load_user(id: String) -> Result<(), JsValue> {
+    let data = fetch_user(&id).await?;   // any async work
+    user().set(data);
+    Ok(())
+}
+```
+
+```ts
+await load_user("42");   // stores.user subscribers have already fired
+```
+
 ### Initialization
 
 Nothing to call in the usual flow: every bridge entry point (`export()`,
@@ -239,8 +274,9 @@ wasm-bindgen merges its exports into the app's `pkg`.
   skip) happens on the Rust side,
 - key names follow serde attributes: `#[serde(rename_all = "camelCase")]`,
   `#[serde(rename = "...")]` — Rust and TS agree on strings,
-- derive `tsify::Tsify` on your state types to get real TS interfaces at the
-  boundary.
+- custom value types in `define_stores!` / `export_stores!` must derive
+  `tsify::Tsify` (`js` feature) — see above; the interface name in `.d.ts`
+  must match the Rust type name.
 
 ### Divergences from JS nanostores (v0.1)
 
@@ -249,6 +285,27 @@ wasm-bindgen merges its exports into the app's `pkg`.
 - `batched` on native without a scheduler degenerates to `computed`,
 - not ported yet: `deepMap` / `setPath`, `effect`, `task` / `allTasks`,
   `keepMount`, `mapCreator`.
+
+## Roadmap
+
+- [ ] `deepMap` + `setPath` / `getPath`
+- [ ] `effect`, `keepMount` / `cleanStores` test utilities
+- [ ] **Kotlin/Android bindings.** Planned layering (validated by research,
+      not yet by code): a platform-agnostic `nanostores-erased` crate —
+      values as JSON strings, object-safe `ErasedStore`/`ErasedListener`
+      traits, cancellable subscriptions, a name→store registry — then a thin
+      `nanostores-uniffi` crate (uniffi foreign trait for listeners,
+      `AutoCloseable` subscriptions) and a Kotlin package projecting handles
+      into `MutableStateFlow<T>` for Compose, with types generated from the
+      same serde structs via [typeshare](https://github.com/1Password/typeshare).
+      Built when an app needs it; the wasm bridge keeps its faster direct
+      `JsValue` path regardless.
+- [ ] Dart/Flutter bridge via flutter_rust_bridge (`StreamSink` → Dart
+      `Stream<T>` maps 1:1 to `subscribe`)
+- [ ] typeshare integration (`make types`: Kotlin/Swift types from the same
+      serde structs)
+- [ ] boundary benchmarks (criterion + browser)
+- [ ] `cargo-semver-checks` in CI
 
 ## Example app
 

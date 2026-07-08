@@ -1,7 +1,9 @@
 #![cfg(target_arch = "wasm32")]
 
 use js_sys::{Function, Object, Reflect};
-use nanostores::{Atom, MapStore, NanoMap, Scheduler, StoreLike, Subscription, set_scheduler};
+use nanostores::{
+    Atom, MapStore, NanoMap, Scheduler, StoreLike, Subscription, set_scheduler_if_unset,
+};
 use send_wrapper::SendWrapper;
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Display;
@@ -281,14 +283,18 @@ pub fn __nanostores_wasm_store_kinds(entries: &[(&str, &str)]) -> JsValue {
     object.into()
 }
 
-/// Install the browser microtask scheduler for `batched` stores. Idempotent.
+/// Install the browser microtask scheduler for `batched` stores. Idempotent,
+/// and never overrides a scheduler the application set explicitly via
+/// `nanostores::set_scheduler`.
 ///
 /// Every bridge entry point (`export()`, handle constructors) calls this, so
 /// explicit initialization is only needed when a Rust wasm app uses `batched`
 /// from the core crate without creating any bridge handles first.
 pub fn install_scheduler() {
     static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| set_scheduler(MicrotaskScheduler));
+    INSTALL.call_once(|| {
+        set_scheduler_if_unset(MicrotaskScheduler);
+    });
 }
 
 struct MicrotaskScheduler;
@@ -378,6 +384,79 @@ fn js_error(error: impl Display) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
 }
 
+/// Define application stores and export them in one block: generates a
+/// `LazyLock` static plus a `fn name() -> &'static ...` accessor per store,
+/// then delegates to [`export_stores!`]. Later definitions may reference
+/// earlier stores through their accessors (`count()` below).
+///
+/// Custom value types (`User` here) MUST derive `tsify::Tsify` (with the
+/// `js` feature) — the generated `.d.ts` references the type by name, and
+/// without a Tsify-emitted interface the TypeScript build breaks.
+///
+/// ```ignore
+/// nanostores_wasm::define_stores! {
+///     pub fn stores() -> StoreHandles {
+///         atom count: i64 = 0;
+///         map user: User = User::default();
+///         readable doubled: i64 = computed((count().clone(),), |v| v * 2);
+///     }
+/// }
+///
+/// #[wasm_bindgen]
+/// pub fn increment() {
+///     count().set(count().get() + 1);
+/// }
+/// ```
+#[macro_export]
+macro_rules! define_stores {
+    (
+        $(#[$meta:meta])*
+        pub fn $stores_fn:ident() -> $handles_ty:ident {
+            $($kind:ident $name:ident : $value_ty:ident = $init:expr;)*
+        }
+    ) => {
+        $(
+            $crate::__nanostores_wasm_define_store!($kind, $name, $value_ty, $init);
+        )*
+
+        $crate::export_stores! {
+            $(#[$meta])*
+            pub fn $stores_fn() -> $handles_ty {
+                $($kind $name : $value_ty = $name();)*
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __nanostores_wasm_define_store {
+    (atom, $name:ident, $value_ty:ident, $init:expr) => {
+        pub fn $name() -> &'static ::nanostores::Atom<$value_ty> {
+            static STORE: ::std::sync::LazyLock<::nanostores::Atom<$value_ty>> =
+                ::std::sync::LazyLock::new(|| ::nanostores::atom($init));
+            ::std::sync::LazyLock::force(&STORE)
+        }
+    };
+    (map, $name:ident, $value_ty:ident, $init:expr) => {
+        pub fn $name() -> &'static ::nanostores::MapStore<$value_ty> {
+            static STORE: ::std::sync::LazyLock<::nanostores::MapStore<$value_ty>> =
+                ::std::sync::LazyLock::new(|| ::nanostores::map($init));
+            ::std::sync::LazyLock::force(&STORE)
+        }
+    };
+    (readable, $name:ident, $value_ty:ident, $init:expr) => {
+        pub fn $name() -> &'static ::nanostores::AnyStore<$value_ty> {
+            static STORE: ::std::sync::LazyLock<::nanostores::AnyStore<$value_ty>> =
+                ::std::sync::LazyLock::new(|| ::nanostores::AnyStore::new($init));
+            ::std::sync::LazyLock::force(&STORE)
+        }
+    };
+}
+
+/// Export existing stores to JS. Prefer [`define_stores!`] unless the store
+/// statics already exist. Custom value types MUST derive `tsify::Tsify`
+/// (`js` feature) — the emitted `.d.ts` references them by name.
 #[macro_export]
 macro_rules! export_stores {
     (

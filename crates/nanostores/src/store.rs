@@ -1,4 +1,6 @@
 use crate::Subscription;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 pub type Listener<T> = dyn Fn(&T, Option<&str>) + Send + Sync + 'static;
@@ -89,6 +91,21 @@ impl<T> Default for State<T> {
 pub(crate) struct StoreInner<T> {
     value: RwLock<T>,
     state: Mutex<State<T>>,
+    // Concurrent writers race to notify; without ordering a slower thread
+    // could deliver an older value AFTER a newer one. Writes get a monotonic
+    // seq under the value lock, notifications go through a queue drained by
+    // a single thread at a time, and anything older than the last delivered
+    // seq is dropped as superseded.
+    write_seq: AtomicU64,
+    delivered_seq: AtomicU64,
+    notify_queue: Mutex<VecDeque<QueuedNotification<T>>>,
+    draining: AtomicBool,
+}
+
+struct QueuedNotification<T> {
+    seq: u64,
+    value: T,
+    changed_key: Option<String>,
 }
 
 impl<T> StoreInner<T>
@@ -99,6 +116,10 @@ where
         Arc::new(Self {
             value: RwLock::new(value),
             state: Mutex::new(State::default()),
+            write_seq: AtomicU64::new(0),
+            delivered_seq: AtomicU64::new(0),
+            notify_queue: Mutex::new(VecDeque::new()),
+            draining: AtomicBool::new(false),
         })
     }
 
@@ -246,13 +267,14 @@ where
             next = value;
         }
 
-        {
+        let seq = {
             let mut current = self.value.write().expect("store value poisoned");
             if *current == next {
                 return false;
             }
             *current = next.clone();
-        }
+            self.write_seq.fetch_add(1, Ordering::SeqCst) + 1
+        };
 
         let mut notify_context = NotifyContext::new(next, changed_key.clone());
         for hook in self.snapshot_notify_hooks() {
@@ -274,24 +296,71 @@ where
             }
         }
 
-        self.notify_listeners(&notify_value, changed_key.as_deref());
+        self.notify_listeners(seq, notify_value, changed_key);
         true
     }
 
-    fn notify_listeners(&self, value: &T, changed_key: Option<&str>) {
-        let listeners = {
-            let state = self.state.lock().expect("store state poisoned");
-            state
-                .listeners
-                .iter()
-                .filter(|entry| listener_matches(entry.keys.as_deref(), changed_key))
-                .map(|entry| Arc::clone(&entry.listener))
-                .collect::<Vec<_>>()
-        };
+    fn notify_listeners(&self, seq: u64, value: T, changed_key: Option<String>) {
+        self.notify_queue
+            .lock()
+            .expect("store notify queue poisoned")
+            .push_back(QueuedNotification {
+                seq,
+                value,
+                changed_key,
+            });
 
-        let _notification = crate::computed::notification_guard();
-        for listener in listeners {
-            listener(value, changed_key);
+        // Single drainer: whichever thread wins delivers everything queued
+        // (including notifications enqueued by other threads or reentrant
+        // sets from listeners), in write order. Others just enqueue.
+        if self.draining.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        loop {
+            loop {
+                let item = self
+                    .notify_queue
+                    .lock()
+                    .expect("store notify queue poisoned")
+                    .pop_front();
+                let Some(item) = item else { break };
+
+                // Superseded by an already-delivered newer write.
+                if item.seq <= self.delivered_seq.load(Ordering::SeqCst) {
+                    continue;
+                }
+                self.delivered_seq.store(item.seq, Ordering::SeqCst);
+
+                let changed_key = item.changed_key.as_deref();
+                let listeners = {
+                    let state = self.state.lock().expect("store state poisoned");
+                    state
+                        .listeners
+                        .iter()
+                        .filter(|entry| listener_matches(entry.keys.as_deref(), changed_key))
+                        .map(|entry| Arc::clone(&entry.listener))
+                        .collect::<Vec<_>>()
+                };
+
+                let _notification = crate::computed::notification_guard();
+                for listener in listeners {
+                    listener(&item.value, changed_key);
+                }
+            }
+
+            self.draining.store(false, Ordering::SeqCst);
+            // A racer may have enqueued between the final pop and the flag
+            // reset; reclaim drain rights unless someone else already did.
+            if self
+                .notify_queue
+                .lock()
+                .expect("store notify queue poisoned")
+                .is_empty()
+                || self.draining.swap(true, Ordering::SeqCst)
+            {
+                break;
+            }
         }
     }
 

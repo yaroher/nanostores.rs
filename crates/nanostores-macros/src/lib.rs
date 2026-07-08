@@ -54,6 +54,18 @@ fn expand_nano_map(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             .unwrap_or_else(|| rename_field(&ident.to_string(), rename_all.as_deref()));
         let key_lit = LitStr::new(&key, ident.span());
         let setter = format_ident!("set_{}", ident);
+        // MapStore's inherent methods win over the generated extension trait,
+        // silently shadowing the setter — reject instead.
+        if setter == "set_key" || setter == "set_field_by" {
+            return Err(syn::Error::new_spanned(
+                &ident,
+                format!(
+                    "field `{ident}` would generate setter `{setter}`, which collides with \
+                     an inherent MapStore method; rename the field (serde rename does not help \
+                     here — the setter is named after the Rust field)"
+                ),
+            ));
+        }
 
         keys.push(quote!(#key_lit));
         set_arms.push(quote! {

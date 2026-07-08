@@ -1,6 +1,6 @@
 use nanostores::{
-    NanoMap, Scheduler, atom, batched, computed, flush, map, on_mount, on_notify, on_set, on_start,
-    on_stop, set_scheduler,
+    AnyStore, NanoMap, Scheduler, atom, batched, computed, flush, map, on_mount, on_notify,
+    on_set, on_start, on_stop, set_scheduler,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -342,6 +342,24 @@ fn lifecycle_hooks_start_stop_set_and_notify() {
 
     assert_eq!(count.get(), 50);
     assert_eq!(*notifications.lock().unwrap(), vec![50]);
+}
+
+#[test]
+fn any_store_erases_computed_type_and_stays_reactive() {
+    let _scheduler = scheduler_test_guard();
+    let count = atom(2);
+    let doubled: AnyStore<i64> = AnyStore::new(computed((count.clone(),), |v| v * 2));
+
+    assert_eq!(doubled.get(), 4);
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = doubled.subscribe({
+        let events = Arc::clone(&events);
+        move |value, _| events.lock().unwrap().push(*value)
+    });
+    count.set(5);
+
+    assert_eq!(*events.lock().unwrap(), vec![4, 10]);
 }
 
 #[test]

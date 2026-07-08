@@ -1,57 +1,53 @@
 use crate::Subscription;
 use crate::scheduler;
 use crate::store::{Listener, StoreInner, StoreLike};
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 type DeferredJob = Box<dyn FnOnce() + Send + 'static>;
 
-static NOTIFICATION_DEPTH: AtomicUsize = AtomicUsize::new(0);
-static DEFERRED_RECOMPUTES: LazyLock<Mutex<VecDeque<DeferredJob>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::new()));
+// Per-thread: a notification stack on thread A must not defer (nor execute)
+// recomputes triggered by stores notifying concurrently on thread B.
+thread_local! {
+    static NOTIFICATION_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static DEFERRED_RECOMPUTES: RefCell<VecDeque<DeferredJob>> =
+        const { RefCell::new(VecDeque::new()) };
+}
 
 pub(crate) struct NotificationGuard;
 
 pub(crate) fn notification_guard() -> NotificationGuard {
-    enter_notification();
+    NOTIFICATION_DEPTH.with(|depth| depth.set(depth.get() + 1));
     NotificationGuard
 }
 
 impl Drop for NotificationGuard {
     fn drop(&mut self) {
-        exit_notification();
-    }
-}
-
-fn enter_notification() {
-    NOTIFICATION_DEPTH.fetch_add(1, Ordering::SeqCst);
-}
-
-fn exit_notification() {
-    if NOTIFICATION_DEPTH.fetch_sub(1, Ordering::SeqCst) == 1 {
-        flush_deferred_recomputes();
+        let is_outermost = NOTIFICATION_DEPTH.with(|depth| {
+            let value = depth.get();
+            depth.set(value - 1);
+            value == 1
+        });
+        if is_outermost {
+            flush_deferred_recomputes();
+        }
     }
 }
 
 fn defer_or_run(job: impl FnOnce() + Send + 'static) {
-    if NOTIFICATION_DEPTH.load(Ordering::SeqCst) == 0 {
+    let deferred = NOTIFICATION_DEPTH.with(|depth| depth.get() > 0);
+    if deferred {
+        DEFERRED_RECOMPUTES.with(|queue| queue.borrow_mut().push_back(Box::new(job)));
+    } else {
         job();
-        return;
     }
-
-    DEFERRED_RECOMPUTES
-        .lock()
-        .expect("computed deferred queue poisoned")
-        .push_back(Box::new(job));
 }
 
 fn flush_deferred_recomputes() {
     loop {
-        let job = DEFERRED_RECOMPUTES
-            .lock()
-            .expect("computed deferred queue poisoned")
-            .pop_front();
+        let job = DEFERRED_RECOMPUTES.with(|queue| queue.borrow_mut().pop_front());
         match job {
             Some(job) => job(),
             None => break,

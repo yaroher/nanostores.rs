@@ -2,7 +2,7 @@ import { useStore } from "@nanostores/preact";
 import { listenKeys } from "nanostores";
 import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import { increment, type User } from "./pkg/browser_app_core";
+import { increment, load_user, type User } from "./pkg/browser_app_core";
 import { createStores, type AppStores } from "./pkg/browser_app_core_stores";
 import "./styles.css";
 
@@ -65,6 +65,9 @@ function App({ stores }: { stores: AppStores }) {
             <button type="submit">Set</button>
             <button type="button" onClick={() => increment()}>
               Increment
+            </button>
+            <button type="button" onClick={() => void load_user("Grace")}>
+              Load user (async)
             </button>
           </div>
         </form>

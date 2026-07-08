@@ -1,0 +1,5 @@
+error: field `key` would generate setter `set_key`, which collides with an inherent MapStore method; rename the field (serde rename does not help here — the setter is named after the Rust field)
+ --> tests/ui/nanomap_setter_collision.rs:6:5
+  |
+6 |     key: String,
+  |     ^^^
