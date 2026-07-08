@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/nanostores",
+    "crates/nanostores-macros",
+    "crates/nanostores-wasm",
+    "examples/browser-app/core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/yaroher/nanostores.rs"
+
+[workspace.dependencies]
+nanostores-macros = { version = "0.1.0", path = "crates/nanostores-macros" }
+nanostores = { version = "0.1.0", path = "crates/nanostores" }
+nanostores-wasm = { version = "0.1.0", path = "crates/nanostores-wasm" }
+proc-macro2 = "1"
+quote = "1"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+serde_json = "1"
+send_wrapper = "0.6"
+syn = { version = "2", features = ["full", "extra-traits"] }
+trybuild = "1"
+tsify = { version = "0.5.6", features = ["js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-test = "0.3"
+js-sys = "0.3"

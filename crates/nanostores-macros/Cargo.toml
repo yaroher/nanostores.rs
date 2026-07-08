@@ -1,0 +1,24 @@
+[package]
+name = "nanostores-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derive macros for nanostores.rs map stores."
+readme = "../../README.md"
+categories = ["development-tools::procedural-macro-helpers"]
+keywords = ["nanostores", "derive", "macro"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+nanostores = { path = "../nanostores" }
+serde.workspace = true
+serde_json.workspace = true
+trybuild.workspace = true

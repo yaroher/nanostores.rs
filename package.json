@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "examples/browser-app/ui"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace nanostores-wasm && npm run build --workspace browser-app-ui",
+    "test": "npm run test --workspace nanostores-wasm",
+    "typecheck": "npm run build --workspace nanostores-wasm && npm run typecheck --workspace nanostores-wasm && npm run typecheck --workspace browser-app-ui"
+  }
+}

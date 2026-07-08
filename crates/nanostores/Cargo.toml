@@ -1,0 +1,21 @@
+[package]
+name = "nanostores"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Thread-safe Rust stores modeled after the JavaScript nanostores API."
+readme = "../../README.md"
+categories = ["data-structures", "wasm"]
+keywords = ["nanostores", "reactive", "state", "store"]
+
+[features]
+default = ["derive"]
+derive = ["dep:nanostores-macros"]
+
+[dependencies]
+nanostores-macros = { workspace = true, optional = true }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

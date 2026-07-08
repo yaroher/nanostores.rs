@@ -1,0 +1,25 @@
+[package]
+name = "nanostores-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wasm-bindgen bridge for projecting Rust nanostores into JavaScript nanostores."
+readme = "../../README.md"
+categories = ["wasm", "web-programming"]
+keywords = ["nanostores", "wasm", "wasm-bindgen", "state"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+js-sys.workspace = true
+nanostores.workspace = true
+send_wrapper.workspace = true
+serde.workspace = true
+serde-wasm-bindgen.workspace = true
+wasm-bindgen.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true
+serde_json.workspace = true

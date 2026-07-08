@@ -1,0 +1,18 @@
+[package]
+name = "browser-app-core"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "Browser demo wasm core for nanostores.rs."
+license-file = "../../../LICENSE"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nanostores.workspace = true
+nanostores-wasm.workspace = true
+serde.workspace = true
+tsify.workspace = true
+wasm-bindgen.workspace = true

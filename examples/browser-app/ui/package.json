@@ -1,0 +1,21 @@
+{
+  "name": "browser-app-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@nanostores/preact": "^1.1.0",
+    "nanostores": "^1.4.0",
+    "nanostores-wasm": "0.1.0",
+    "preact": "^10.29.6",
+    "vite": "^7.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

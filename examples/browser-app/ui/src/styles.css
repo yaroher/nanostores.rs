@@ -1,0 +1,143 @@
+:root {
+  color: #171a1f;
+  background: #f4f7f8;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #1f6f68;
+  border-radius: 6px;
+  background: #1f6f68;
+  color: #ffffff;
+  cursor: pointer;
+  min-height: 40px;
+  padding: 0 14px;
+}
+
+button[type="button"] {
+  background: #ffffff;
+  color: #1f6f68;
+}
+
+input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #c6d1d6;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #171a1f;
+  padding: 8px 10px;
+}
+
+label,
+.event-heading {
+  color: #53616a;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.app-shell {
+  width: min(980px, calc(100vw - 32px));
+  margin: 32px auto;
+}
+
+.summary-band {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid #c6d1d6;
+  border-radius: 8px;
+  background: #c6d1d6;
+}
+
+.metric {
+  min-height: 118px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.metric span {
+  display: block;
+  color: #53616a;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.metric strong {
+  display: block;
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+  font-size: clamp(2rem, 8vw, 4.5rem);
+  line-height: 0.95;
+}
+
+.metric.wide strong {
+  font-size: clamp(1.5rem, 4vw, 2.5rem);
+  line-height: 1.05;
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.panel {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  border: 1px solid #d7e0e3;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.inline-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.event-panel {
+  grid-column: 1 / -1;
+}
+
+ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 24px;
+}
+
+li {
+  color: #314047;
+}
+
+@media (max-width: 720px) {
+  .summary-band,
+  .control-grid,
+  .inline-controls {
+    grid-template-columns: 1fr;
+  }
+}
