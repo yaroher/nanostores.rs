@@ -21,6 +21,57 @@ involved.
 The core crate is a standalone reactive library: it works in native Rust
 programs (no wasm required) and is `Send + Sync` throughout.
 
+## Install
+
+Rust side (your wasm crate; `nanostores` alone for native use):
+
+```toml
+[dependencies]
+nanostores = "1"
+nanostores-wasm = "1"
+```
+
+TS side:
+
+```bash
+npm install nanostores-wasm nanostores
+```
+
+`nanostores` is a peer dependency — the projections must be created by the
+same nanostores instance your app uses.
+
+## How it works
+
+One synchronous round trip per write; the projection's real `set` is only
+ever called from the wasm change callback, so there is no echo loop and no
+double-fire by construction:
+
+```
+TS  $count.set(5)
+      └─ forwarded to wasm handle.set(JsValue)      (no local set)
+           └─ Rust atom.set(5)
+                ├─ on_set hooks: may transform the value or abort
+                ├─ PartialEq check: equal value -> no notification at all
+                └─ Rust listeners fire (computed recompute, your logic, ...)
+                     └─ bridge listener serializes -> JS callback
+                          └─ projection's ORIGINAL set applies the value
+                               └─ JS subscribers fire (React/Preact re-render)
+```
+
+- **Rejection**: `on_set` calls `ctx.abort()` → no notification comes back →
+  the projection keeps its old value; the TS write becomes a silent no-op
+  (deserialize errors additionally land in `console.error`).
+- **Transformation**: `on_set` mutates `ctx.value_mut()` → the transformed
+  value is what returns to JS.
+- **Rust-initiated writes** (`count.set(...)` anywhere in Rust) go through
+  the same bridge listener and reach the projection identically.
+- **Map granularity**: `setKey` crosses as `(key, value)` and is applied via
+  the projection's native `setKey`, so JS `listenKeys` filtering works
+  without any bookkeeping.
+- **Laziness**: the wasm subscription exists only while the projection has
+  JS listeners (nanostores `onMount` / unmount drives it). Unmounted
+  projections still write through and re-read `handle.get()` after a write.
+
 ## Workspace
 
 | Crate / package | What it is |
@@ -79,13 +130,18 @@ attached / last removed), `on_mount` (start + cleanup on stop), `on_set` /
 `on_notify` (intercept before write / before listeners, `ctx.abort()`
 cancels).
 
-Key listeners for maps:
+Key listeners for maps (`update()` and whole-value `set` notify with
+`changed_key = None`, which matches every key filter — same as JS
+`listenKeys`):
 
 ```rust
 let _sub = user.listen_keys(&["name", "displayName"], |u, changed| {
     println!("{changed:?} -> {}", u.name);
 });
 ```
+
+`computed` / `batched` take a tuple of source stores — any `StoreLike` mix
+(atoms, maps, other computeds), arity 1 to 8.
 
 ### Threading & scheduler
 
@@ -217,10 +273,18 @@ make test-wasm      # wasm32 build + clippy
 make test-browser   # wasm-pack tests (headless chrome)
 make test-js        # rebuild wasm pkg + typecheck + vitest + production build
 make doc            # cargo doc
+make release        # interactive: bump version, tag vX.Y.Z, push
 ```
 
 CI mirrors these targets (native / wasm / browser / js jobs); the browser job
 is non-blocking because headless chrome is flaky in CI.
+
+Releases are tag-driven: `make release` bumps one version across the Cargo
+workspace and npm packages, commits, tags `vX.Y.Z` and pushes; the tag
+triggers `release.yml`, which re-runs CI, creates a GitHub release, and
+publishes to crates.io (`nanostores-macros` → `nanostores` →
+`nanostores-wasm`) and npm. Requires `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN`
+repository secrets.
 
 ## License
 
