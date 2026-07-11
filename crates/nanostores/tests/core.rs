@@ -1,6 +1,6 @@
 use nanostores::{
-    AnyStore, NanoMap, Scheduler, atom, batched, computed, flush, map, on_mount, on_notify,
-    on_set, on_start, on_stop, set_scheduler,
+    AnyStore, NanoMap, Scheduler, atom, batched, computed, flush, map, on_mount, on_notify, on_set,
+    on_start, on_stop, set_scheduler,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};

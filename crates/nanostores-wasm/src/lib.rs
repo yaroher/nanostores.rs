@@ -2,12 +2,15 @@
 
 use js_sys::{Function, Object, Reflect};
 use nanostores::{
-    Atom, MapStore, NanoMap, Scheduler, StoreLike, Subscription, set_scheduler_if_unset,
+    Atom, CollectionStore, MapStore, NanoMap, Scheduler, StoreLike, Subscription,
+    set_scheduler_if_unset,
 };
 use send_wrapper::SendWrapper;
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Display;
+use std::hash::Hash;
 use std::marker::PhantomData;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, Once};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -32,6 +35,18 @@ trait ErasedMap: Send + Sync {
     fn subscribe(&self, callback: Function) -> Subscription;
 }
 
+/// A collection store seen from JS. `subscribe_key` is the whole point of the
+/// type: a row component listens to ITS row and is not woken by its neighbours
+/// or by a re-sort.
+trait ErasedCollection: Send + Sync {
+    fn get(&self) -> Result<JsValue, JsValue>;
+    fn get_item(&self, key: &str) -> Result<JsValue, JsValue>;
+    fn order(&self) -> Result<JsValue, JsValue>;
+    fn subscribe(&self, callback: Function) -> Subscription;
+    fn subscribe_key(&self, key: &str, callback: Function) -> Subscription;
+    fn subscribe_order(&self, callback: Function) -> Subscription;
+}
+
 struct WritableAtomProjection<T>
 where
     T: Clone + PartialEq + Send + Sync + 'static,
@@ -49,6 +64,69 @@ where
     T: NanoMap + Clone + PartialEq + Send + Sync + 'static,
 {
     store: MapStore<T>,
+}
+
+struct CollectionProjection<K, V>
+where
+    K: Eq + Hash + Clone + Display + Send + Sync + 'static,
+    V: Clone + PartialEq + Send + Sync + 'static,
+{
+    store: CollectionStore<K, V>,
+}
+
+impl<K, V> ErasedCollection for CollectionProjection<K, V>
+where
+    K: Eq + Hash + Clone + Display + FromStr + Serialize + Send + Sync + 'static,
+    V: Serialize + Clone + PartialEq + Send + Sync + 'static,
+{
+    fn get(&self) -> Result<JsValue, JsValue> {
+        // Наружу — МАССИВ строк в порядке стора: JS-сторона рисует список, а
+        // словарь ей ни к чему (адресуется она ключом через get_item).
+        let snapshot = self.store.get();
+        let rows: Vec<&V> = snapshot.iter().map(|(_, value)| value).collect();
+        to_js(&rows)
+    }
+
+    fn get_item(&self, key: &str) -> Result<JsValue, JsValue> {
+        let Ok(key) = key.parse::<K>() else {
+            return Ok(JsValue::UNDEFINED);
+        };
+        match self.store.get_item(&key) {
+            Some(value) => to_js(&value),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    fn order(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.store.get().order().to_vec())
+    }
+
+    fn subscribe(&self, callback: Function) -> Subscription {
+        let callback = callback_cell(callback);
+        self.store.subscribe(move |snapshot, _| {
+            let rows: Vec<&V> = snapshot.iter().map(|(_, value)| value).collect();
+            call_atom(&callback, &rows);
+        })
+    }
+
+    fn subscribe_key(&self, key: &str, callback: Function) -> Subscription {
+        let Ok(parsed) = key.parse::<K>() else {
+            // Мусорный ключ = подписка в никуда, а не паника: JS-сторона
+            // прислала строку, которой у нас нет типа.
+            return self.store.listen(move |_, _| {});
+        };
+        let callback = callback_cell(callback);
+        let wanted = parsed.clone();
+        self.store.listen_key(&parsed, move |snapshot, _| {
+            call_atom(&callback, &snapshot.get(&wanted));
+        })
+    }
+
+    fn subscribe_order(&self, callback: Function) -> Subscription {
+        let callback = callback_cell(callback);
+        self.store
+            .listen_order(move |snapshot, _| call_atom(&callback, &snapshot.order().to_vec()))
+    }
 }
 
 impl<T> ErasedAtom for WritableAtomProjection<T>
@@ -201,6 +279,64 @@ impl MapHandle {
 
     pub fn subscribe(&self, callback: Function) -> SubscriptionHandle {
         SubscriptionHandle::new(self.inner.subscribe(callback))
+    }
+}
+
+/// Список строк для JS: подписка на ОДНУ строку (`subscribeKey`), на порядок
+/// (`subscribeOrder`) или на всё сразу. Ради первого он и существует: без него
+/// правка одного сообщения перерисовывала бы весь список.
+#[wasm_bindgen]
+pub struct CollectionHandle {
+    inner: Arc<dyn ErasedCollection>,
+}
+
+impl CollectionHandle {
+    pub fn from_collection<K, V>(store: &CollectionStore<K, V>) -> Self
+    where
+        K: Eq + Hash + Clone + Display + FromStr + Serialize + Send + Sync + 'static,
+        V: Serialize + Clone + PartialEq + Send + Sync + 'static,
+    {
+        install_scheduler();
+        Self {
+            inner: Arc::new(CollectionProjection {
+                store: store.clone(),
+            }),
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl CollectionHandle {
+    /// Все строки В ПОРЯДКЕ стора.
+    pub fn get(&self) -> Result<JsValue, JsValue> {
+        self.inner.get()
+    }
+
+    /// Одна строка по ключу; нет такой — undefined.
+    #[wasm_bindgen(js_name = getItem)]
+    pub fn get_item(&self, key: String) -> Result<JsValue, JsValue> {
+        self.inner.get_item(&key)
+    }
+
+    /// Ключи в порядке отрисовки.
+    pub fn order(&self) -> Result<JsValue, JsValue> {
+        self.inner.order()
+    }
+
+    pub fn subscribe(&self, callback: Function) -> SubscriptionHandle {
+        SubscriptionHandle::new(self.inner.subscribe(callback))
+    }
+
+    /// Подписка на ОДНУ строку: соседи и пересортировка её не будят.
+    #[wasm_bindgen(js_name = subscribeKey)]
+    pub fn subscribe_key(&self, key: String, callback: Function) -> SubscriptionHandle {
+        SubscriptionHandle::new(self.inner.subscribe_key(&key, callback))
+    }
+
+    /// Подписка на ПОРЯДОК (состав/сортировка списка, без содержимого строк).
+    #[wasm_bindgen(js_name = subscribeOrder)]
+    pub fn subscribe_order(&self, callback: Function) -> SubscriptionHandle {
+        SubscriptionHandle::new(self.inner.subscribe_order(callback))
     }
 }
 

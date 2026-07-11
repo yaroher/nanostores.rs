@@ -2,6 +2,7 @@
 
 mod any;
 mod atom;
+mod collection;
 mod computed;
 mod error;
 mod lifecycle;
@@ -12,6 +13,7 @@ mod subscription;
 
 pub use any::AnyStore;
 pub use atom::{Atom, atom};
+pub use collection::{Collection, CollectionStore, ORDER_KEY, collection};
 pub use computed::{Batched, Computed, batched, computed};
 pub use error::KeyError;
 pub use lifecycle::{Lifecycle, on_mount, on_notify, on_set, on_start, on_stop};
