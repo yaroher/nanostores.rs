@@ -5,6 +5,7 @@ members = [
     "crates/nanostores-macros",
     "crates/nanostores-wasm",
     "examples/browser-app/core",
+    "examples/bench-app/core",
 ]
 
 [workspace.package]

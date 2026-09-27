@@ -1,0 +1,19 @@
+{
+  "name": "bench-app-ui",
+  "version": "1.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bench": "node scripts/run-bench.mjs"
+  },
+  "dependencies": {
+    "nanostores": "^1.4.0",
+    "nanostores-wasm": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  }
+}

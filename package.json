@@ -4,7 +4,8 @@
   "version": "1.1.1",
   "workspaces": [
     "packages/*",
-    "examples/browser-app/ui"
+    "examples/browser-app/ui",
+    "examples/bench-app/ui"
   ],
   "scripts": {
     "build": "npm run build --workspace nanostores-wasm && npm run build --workspace browser-app-ui",

@@ -5,7 +5,7 @@ SHELL := bash
 # Publish order matters: dependencies first.
 CRATES := nanostores-macros nanostores nanostores-wasm
 
-.PHONY: help test test-wasm test-browser test-js doc build-example release publish-crates publish-npm
+.PHONY: help test test-wasm test-browser test-js doc build-example build-bench bench release publish-crates publish-npm
 
 help:
 	@echo "make test           - cargo test + clippy (native)"
@@ -14,6 +14,8 @@ help:
 	@echo "make test-js        - rebuild wasm package + npm typecheck + vitest + production build"
 	@echo "make doc            - cargo doc"
 	@echo "make build-example  - rebuild browser-app wasm package"
+	@echo "make build-bench    - rebuild bench-app wasm package"
+	@echo "make bench          - build + run the boundary benchmark in headless chrome"
 	@echo "make release        - interactive tag-driven release"
 	@echo "make publish-crates - publish all crates to crates.io in dependency order (used by CI)"
 	@echo "make publish-npm    - publish packages/nanostores-wasm to npm (used by CI)"
@@ -41,6 +43,14 @@ doc:
 build-example:
 	wasm-pack build examples/browser-app/core --target web --out-dir ../ui/src/pkg
 	node packages/nanostores-wasm/scripts/generate-wrapper.mjs examples/browser-app/ui/src/pkg/browser_app_core
+
+build-bench:
+	wasm-pack build examples/bench-app/core --target web --out-dir ../ui/src/pkg
+
+bench: build-bench
+	npm run build --workspace nanostores-wasm
+	npm run build --workspace bench-app-ui
+	node examples/bench-app/ui/scripts/run-bench.mjs
 
 # --- publish (CI) ------------------------------------------------------------
 # cargo publish waits for crates.io index propagation since 1.66, so a plain

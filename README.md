@@ -278,6 +278,56 @@ wasm-bindgen merges its exports into the app's `pkg`.
   `tsify::Tsify` (`js` feature) — see above; the interface name in `.d.ts`
   must match the Rust type name.
 
+### Benchmarks
+
+`make bench` builds `examples/bench-app` (a wasm core + a one-page Vite app)
+and runs it in headless Chrome via the DevTools protocol, comparing plain JS
+nanostores with the bridge in the same page. One active listener per store;
+values alternate between two variants so every write is a real change;
+median of 5 rounds per scenario. Reproduce with `make bench` — it prints the
+tables and a machine-readable `BENCH_JSON` line.
+
+Writes (µs per op, lower is better; median of 5 rounds,
+Chrome 153 headless, i5-14600K):
+
+| payload | JS `atom.set` | handle, no listeners (in) | Rust-side tick (out) | handle, 1 listener (in+out) | projection (full round trip) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| scalar (1 B) | 0.03 | 0.05 | 0.11 | 0.16 | 0.14 |
+| string (44 B) | 0.04 | 0.15 | 0.40 | 0.64 | 0.47 |
+| object (69 B) | 0.04 | 1.05 | 0.66 | 1.57 | 1.07 |
+| 120 objects (8.8 KB) | 0.04 | 41.3 | 65.1 | 155.7 | 101.9 |
+| 1250 objects (94 KB) | 0.04 | 451.5 | 643.9 | 1119.8 | 1043.8 |
+
+Reads (µs per op): the projection serves a cached JS value, so reads never
+cross the boundary and stay payload-independent — `get()` on the projection
+of the 94 KB store costs 0.69 µs (vs 0.03 µs for a plain JS atom), while
+`get()` on the raw handle pays the full serialization (599.5 µs).
+
+Behaviour (counted, not timed):
+
+| scenario | writes | notifications |
+| --- | ---: | ---: |
+| 100 writes in one task → atom projection | 100 | 100 |
+| 100 writes in one task → `batched` projection | 100 | 1 |
+| 1000 unchanged writes → projection | 1000 | 0 |
+| 1000 identical-reference writes → JS atom | 1000 | 0 |
+
+(each row also fires one initial sync when the first listener subscribes)
+
+Reading the numbers:
+
+- the JS baseline swaps references, so its cost is payload-independent;
+  the bridge pays serde-wasm-bindgen per crossing, linear in payload size,
+- a full JS → Rust → JS round trip costs ~1 µs for scalar/small state —
+  noise next to any render — and ~1 ms for 94 KB, which is the honest price
+  of moving that much state across the boundary per write,
+- reads and re-renders never cross: components subscribe to a real JS
+  nanostore holding the last notified value,
+- `batched` coalesces a burst of writes into one notification per flush, and
+  unchanged writes are dropped by `PartialEq` on the Rust side before any
+  serialization happens — for large collections, `CollectionStore`'s
+  per-key subscriptions keep a row edit from reserializing the whole list.
+
 ### Divergences from JS nanostores (v0.1)
 
 - Rust core has no `STORE_UNMOUNT_DELAY` (no portable timer); the JS
@@ -304,7 +354,6 @@ wasm-bindgen merges its exports into the app's `pkg`.
       `Stream<T>` maps 1:1 to `subscribe`)
 - [ ] typeshare integration (`make types`: Kotlin/Swift types from the same
       serde structs)
-- [ ] boundary benchmarks (criterion + browser)
 - [ ] `cargo-semver-checks` in CI
 
 ## Example app
@@ -329,6 +378,7 @@ make test           # cargo test + clippy (native)
 make test-wasm      # wasm32 build + clippy
 make test-browser   # wasm-pack tests (headless chrome)
 make test-js        # rebuild wasm pkg + typecheck + vitest + production build
+make bench          # boundary benchmark in headless chrome (see Benchmarks)
 make doc            # cargo doc
 make release        # interactive: bump version, tag vX.Y.Z, push
 ```
