@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { cleanStores, listenKeys } from "nanostores";
 import {
   projectAtom,
+  projectCollection,
   projectMap,
   projectReadable,
   projectStores,
   type AtomHandle,
+  type CollectionHandle,
   type MapHandle,
   type ReadableHandle,
   type SubscriptionHandle,
@@ -230,5 +232,142 @@ describe("projectStores", () => {
 
     expect(handles.count.value).toBe(3);
     expect(handles.user.value).toEqual({ name: "Grace" });
+  });
+});
+
+class FakeCollectionHandle<V> implements CollectionHandle<V> {
+  rows: Map<string, V>;
+  orderKeys: string[];
+  rowCallbacks = new Map<string, Set<(row: V | undefined) => void>>();
+  orderCallbacks = new Set<(keys: string[]) => void>();
+
+  constructor(rows: Record<string, V>, orderKeys?: string[]) {
+    this.rows = new Map(Object.entries(rows));
+    this.orderKeys = orderKeys ?? Object.keys(rows);
+  }
+
+  get(): V[] {
+    return this.orderKeys
+      .map((key) => this.rows.get(key))
+      .filter((row): row is V => row !== undefined);
+  }
+
+  getItem(key: string): V | undefined {
+    return this.rows.get(key);
+  }
+
+  order(): string[] {
+    return [...this.orderKeys];
+  }
+
+  subscribe(_callback: (rows: V[]) => void): SubscriptionHandle {
+    return new FakeSubscription(() => {});
+  }
+
+  subscribeKey(key: string, callback: (row: V | undefined) => void): SubscriptionHandle {
+    const callbacks = this.rowCallbacks.get(key) ?? new Set();
+    callbacks.add(callback);
+    this.rowCallbacks.set(key, callbacks);
+    return new FakeSubscription(() => callbacks.delete(callback));
+  }
+
+  subscribeOrder(callback: (keys: string[]) => void): SubscriptionHandle {
+    this.orderCallbacks.add(callback);
+    return new FakeSubscription(() => this.orderCallbacks.delete(callback));
+  }
+
+  // Test-side mutations mimicking the Rust store's behaviour.
+  setRow(key: string, value: V): void {
+    const existed = this.rows.has(key);
+    this.rows.set(key, value);
+    if (!existed) this.orderKeys.push(key);
+    for (const callback of this.rowCallbacks.get(key) ?? []) callback(value);
+  }
+
+  removeRow(key: string): void {
+    this.rows.delete(key);
+    this.orderKeys = this.orderKeys.filter((k) => k !== key);
+    for (const callback of this.rowCallbacks.get(key) ?? []) callback(undefined);
+    for (const callback of this.orderCallbacks) callback([...this.orderKeys]);
+  }
+
+  reorder(keys: string[]): void {
+    this.orderKeys = [...keys];
+    for (const callback of this.orderCallbacks) callback([...this.orderKeys]);
+  }
+}
+
+describe("projectCollection", () => {
+  it("order is a real atom that follows re-sorts", () => {
+    const handle = new FakeCollectionHandle({ a: 1, b: 2 });
+    const projection = projectCollection(handle);
+
+    const seen: (readonly string[])[] = [];
+    const unbind = projection.order.subscribe((keys) => seen.push(keys));
+
+    handle.reorder(["b", "a"]);
+
+    expect(seen[0]).toEqual(["a", "b"]);
+    expect(seen[1]).toEqual(["b", "a"]);
+    expect(projection.order.get()).toEqual(["b", "a"]);
+
+    unbind();
+  });
+
+  it("getRow wakes only its own row, lazily", () => {
+    const handle = new FakeCollectionHandle({ a: 1, b: 2 });
+    const projection = projectCollection(handle);
+
+    expect(handle.rowCallbacks.size).toBe(0);
+
+    const seenA: (number | undefined)[] = [];
+    const unbindA = projection.getRow("a").subscribe((value) => seenA.push(value));
+
+    expect(handle.rowCallbacks.has("a")).toBe(true);
+    expect(handle.rowCallbacks.has("b")).toBe(false);
+
+    handle.setRow("b", 22);
+    expect(seenA).toEqual([1]);
+
+    handle.setRow("a", 11);
+    expect(seenA).toEqual([1, 11]);
+
+    // Same key returns the same atom; it is not re-created.
+    expect(projection.getRow("a").get()).toBe(11);
+
+    unbindA();
+  });
+
+  it("a removed row notifies undefined and the order atom", () => {
+    const handle = new FakeCollectionHandle({ a: 1, b: 2 });
+    const projection = projectCollection(handle);
+
+    const seen: (number | undefined)[] = [];
+    const unbind = projection.getRow("a").subscribe((value) => seen.push(value));
+    const orderSeen: (readonly string[])[] = [];
+    const unbindOrder = projection.order.subscribe((keys) => orderSeen.push(keys));
+
+    handle.removeRow("a");
+
+    expect(seen).toEqual([1, undefined]);
+    expect(orderSeen[orderSeen.length - 1]).toEqual(["b"]);
+    expect(projection.getRow("a").get()).toBeUndefined();
+
+    unbind();
+    unbindOrder();
+  });
+
+  it("releases row subscriptions after unmount", () => {
+    const handle = new FakeCollectionHandle({ a: 1 });
+    const projection = projectCollection(handle);
+
+    const row = projection.getRow("a");
+    const unbind = row.subscribe(() => {});
+    expect(handle.rowCallbacks.get("a")?.size).toBe(1);
+
+    unbind();
+    cleanStores(row);
+
+    expect(handle.rowCallbacks.get("a")?.size ?? 0).toBe(0);
   });
 });

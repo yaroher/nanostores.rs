@@ -18,6 +18,8 @@ import { projectStores } from "nanostores-wasm";
 import initWasmCore, {
   stores as rawStores,
   tick_large,
+  tick_list_order,
+  tick_list_row,
   tick_medium,
   tick_scalar,
   tick_small,
@@ -46,6 +48,16 @@ interface RawHandle<T> {
   get(): T;
   set(value: T): void;
   subscribe(callback: () => void): { unsubscribe(): void };
+}
+
+interface ReadableLike<T> {
+  get(): T;
+  subscribe(callback: () => void): () => void;
+}
+
+interface CollectionProjectionLike<V> {
+  order: WritableLike<string[]>;
+  getRow(key: string): ReadableLike<V | undefined>;
 }
 
 interface Payload<T> {
@@ -159,7 +171,10 @@ async function run(): Promise<BenchResult[]> {
     medium: "atom",
     large: "atom",
     batched_scalar: "readable",
+    list: "collection",
   }) as unknown as Record<string, WritableLike<unknown>>;
+
+  const listProjection = projected.list as unknown as CollectionProjectionLike<unknown>;
 
   const payloads: Payload<unknown>[] = [
     { key: "scalar", name: "scalar i32", a: 0, b: 1, tick: tick_scalar },
@@ -230,6 +245,57 @@ async function run(): Promise<BenchResult[]> {
         sink += Object.is(handle.get(), null) ? 1 : 0;
       });
     }
+  }
+
+  // Collection: the same 1250 rows, but keyed. Editing one row crosses only
+  // that row; re-sorting crosses only the key array.
+  {
+    const payload: Payload<unknown> = {
+      key: "list",
+      name: "collection 1250 rows",
+      a: makeRows(1250, 0),
+      b: makeRows(1250, 1),
+    };
+
+    const row = listProjection.getRow("0");
+    const unRow = row.subscribe(() => sink++);
+    await benchSync(results, "list:row-edit", payload, tick_list_row);
+    unRow();
+
+    const unOrder = listProjection.order.subscribe(() => sink++);
+    await benchSync(results, "list:reorder", payload, tick_list_order);
+    unOrder();
+  }
+
+  // Counting scenario: a row edit wakes only that row — neighbours and the
+  // order atom stay asleep.
+  {
+    let row0 = 0;
+    let row1 = 0;
+    let row2 = 0;
+    let orderCallbacks = 0;
+    const un0 = listProjection.getRow("0").subscribe(() => row0++);
+    const un1 = listProjection.getRow("1").subscribe(() => row1++);
+    const un2 = listProjection.getRow("2").subscribe(() => row2++);
+    const unOrder = listProjection.order.subscribe(() => orderCallbacks++);
+    const initial = row0 + row1 + row2 + orderCallbacks;
+
+    for (let i = 0; i < 100; i++) tick_list_row();
+    await settle();
+    await settle();
+
+    const woken = row0 + row1 + row2 + orderCallbacks - initial;
+    results.push({
+      kind: "count",
+      scenario: "collection:row-edit",
+      payload: "1250 rows",
+      writes: 100,
+      callbacks: woken,
+    });
+    un0();
+    un1();
+    un2();
+    unOrder();
   }
 
   // Counting scenario: batched coalescing.

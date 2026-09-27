@@ -198,6 +198,39 @@ If your store statics already exist, the lower-level `export_stores!` takes
 expressions instead of definitions (same body syntax, `= <expr>;` on the
 right).
 
+### Collections
+
+`collection` exports a [`CollectionStore`](#rust-core) as two real
+nanostores on the JS side: `order` (key array) and `getRow(key)` (one atom
+per row, subscribed lazily while it has listeners). Mutations stay in Rust —
+JS reads and reacts:
+
+```rust
+nanostores_wasm::define_stores! {
+    pub fn stores() -> StoreHandles {
+        collection messages: (u64, Message) = load_messages();
+    }
+}
+
+// Rust-side edit: only this row's components re-render.
+#[wasm_bindgen]
+pub fn edit_message(id: u64, text: String) {
+    messages().update_item(id, |message| {
+        message.text = text;
+        true
+    });
+}
+```
+
+```tsx
+const { messages } = stores;                 // NanoCollectionProjection<Message>
+const keys = useStore(messages.order);       // string[]
+const message = useStore(messages.getRow(key)); // Message | undefined
+```
+
+A removed row notifies its atom with `undefined`; a re-sort wakes only
+`order`. Row atoms are cached per key for the projection's lifetime.
+
 The macro emits the typed `.d.ts` contract (`StoreHandles`, `StoreKinds`,
 `ProjectedStoreHandles`). After `wasm-pack build`, generate the app-side
 wrapper next to the wasm-bindgen output:
@@ -336,8 +369,21 @@ Reading the numbers:
   nanostore holding the last notified value,
 - `batched` coalesces a burst of writes into one notification per flush, and
   unchanged writes are dropped by `PartialEq` on the Rust side before any
-  serialization happens — for large collections, `CollectionStore`'s
-  per-key subscriptions keep a row edit from reserializing the whole list.
+  serialization happens.
+
+Collections, measured on a 1250-row store:
+
+| scenario | µs per op | what crosses | who wakes |
+| --- | ---: | --- | --- |
+| edit one row | ~110 | that row only (~1 µs) | that row's listeners only |
+| re-sort | ~360 | key array only | `order` listeners only |
+| whole-list atom write (for contrast) | ~660 | the whole list | every listener |
+
+The boundary does its job: a row edit wakes exactly one row (verified by
+counter — 100 edits, 100 callbacks, neighbours and order asleep). The ~110 µs
+is Rust-side copy-on-write inside the store (full-collection clone plus two
+deep `PartialEq` passes per mutation), not serialization — see the roadmap
+item on in-place collection updates.
 
 ### Divergences from JS nanostores (v0.1)
 
@@ -351,6 +397,11 @@ Reading the numbers:
 
 - [ ] `deepMap` + `setPath` / `getPath`
 - [ ] `effect`, `keepMount` / `cleanStores` test utilities
+- [ ] in-place `CollectionStore` mutation: `update_item` / `set_order` still
+      clone the whole collection and run two deep `PartialEq` passes per
+      mutation (~110 µs per row edit at 1250 rows, vs ~1 µs of actual
+      boundary work) — an in-place write path under the store lock would
+      make row edits O(row), not O(collection)
 - [ ] **Kotlin/Android bindings.** Planned layering (validated by research,
       not yet by code): a platform-agnostic `nanostores-erased` crate —
       values as JSON strings, object-safe `ErasedStore`/`ErasedListener`

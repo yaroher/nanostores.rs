@@ -109,7 +109,16 @@ where
     }
 
     fn order(&self) -> Result<JsValue, JsValue> {
-        to_js(&self.store.get().order().to_vec())
+        // Keys cross as strings, matching the string-keyed getItem /
+        // subscribeKey addressing (K is `Display`).
+        let keys: Vec<String> = self
+            .store
+            .get()
+            .order()
+            .iter()
+            .map(|key| key.to_string())
+            .collect();
+        to_js(&keys)
     }
 
     fn subscribe(&self, callback: Function) -> Subscription {
@@ -135,8 +144,14 @@ where
 
     fn subscribe_order(&self, callback: Function) -> Subscription {
         let callback = callback_cell(callback);
-        self.store
-            .listen_order(move |snapshot, _| call_atom(&callback, &snapshot.order().to_vec()))
+        self.store.listen_order(move |snapshot, _| {
+            let keys: Vec<String> = snapshot
+                .order()
+                .iter()
+                .map(|key| key.to_string())
+                .collect();
+            call_atom(&callback, &keys)
+        })
     }
 }
 
@@ -434,6 +449,18 @@ impl ExportBuilder {
         self
     }
 
+    /// Export a [`CollectionStore`]: JS gets `order`, `getRow`-style per-key
+    /// subscriptions and whole-list reads — see `projectCollection` on the
+    /// JS side for the reactive projection.
+    pub fn collection<K, V>(self, name: &str, store: &CollectionStore<K, V>) -> Self
+    where
+        K: Eq + Hash + Clone + Display + FromStr + Serialize + Send + Sync + 'static,
+        V: Serialize + Clone + PartialEq + Send + Sync + 'static,
+    {
+        self.set(name, CollectionHandle::from_collection(store));
+        self
+    }
+
     pub fn build(self) -> JsValue {
         self.object.into()
     }
@@ -601,6 +628,7 @@ fn js_error(error: impl Display) -> JsValue {
 ///         atom count: i64 = 0;
 ///         map user: User = User::default();
 ///         readable doubled: i64 = computed((count().clone(),), |v| v * 2);
+///         collection messages: (u64, Message) = load_messages();
 ///     }
 /// }
 ///
@@ -614,7 +642,7 @@ macro_rules! define_stores {
     (
         $(#[$meta:meta])*
         pub fn $stores_fn:ident() -> $handles_ty:ident {
-            $($kind:ident $name:ident : $value_ty:ident = $init:expr;)*
+            $($kind:ident $name:ident : $value_ty:tt = $init:expr;)*
         }
     ) => {
         $(
@@ -654,6 +682,13 @@ macro_rules! __nanostores_wasm_define_store {
             ::std::sync::LazyLock::force(&STORE)
         }
     };
+    (collection, $name:ident, ($key_ty:ident, $item_ty:ident), $init:expr) => {
+        pub fn $name() -> &'static ::nanostores::CollectionStore<$key_ty, $item_ty> {
+            static STORE: ::std::sync::LazyLock<::nanostores::CollectionStore<$key_ty, $item_ty>> =
+                ::std::sync::LazyLock::new(|| $init);
+            ::std::sync::LazyLock::force(&STORE)
+        }
+    };
 }
 
 /// Export existing stores to JS. Prefer [`define_stores!`] unless the store
@@ -664,7 +699,7 @@ macro_rules! export_stores {
     (
         $(#[$meta:meta])*
         pub fn $stores_fn:ident() -> $handles_ty:ident {
-            $($kind:ident $name:ident : $value_ty:ident = $store:expr;)*
+            $($kind:ident $name:ident : $value_ty:tt = $store:expr;)*
         }
     ) => {
         $(#[$meta])*
@@ -694,6 +729,10 @@ macro_rules! export_stores {
         #[wasm_bindgen::prelude::wasm_bindgen(typescript_custom_section)]
         const __NANOSTORES_WASM_STORE_TYPES: &'static str = concat!(
             "import type { MapStore as NanoMapStore, ReadableAtom as NanoReadableAtom, WritableAtom as NanoWritableAtom } from 'nanostores';\n",
+            "export interface NanoCollectionProjection<Item> {\n",
+            "  order: NanoWritableAtom<string[]>;\n",
+            "  getRow(key: string): NanoReadableAtom<Item | undefined>;\n",
+            "}\n",
             "export interface ", stringify!($handles_ty), " {\n",
             $(
                 "  ", stringify!($name), ": ",
@@ -733,6 +772,9 @@ macro_rules! __nanostores_wasm_add_store {
     ($builder:expr, readable, $name:expr, $store:expr) => {
         $builder.readable($name, $store)
     };
+    ($builder:expr, collection, $name:expr, $store:expr) => {
+        $builder.collection($name, $store)
+    };
 }
 
 #[doc(hidden)]
@@ -746,6 +788,9 @@ macro_rules! __nanostores_wasm_kind_name {
     };
     (readable) => {
         "readable"
+    };
+    (collection) => {
+        "collection"
     };
 }
 
@@ -789,6 +834,19 @@ macro_rules! __nanostores_wasm_handle_ts_type {
             ") => void): SubscriptionHandle }"
         )
     };
+    (collection, ($key_ty:ident, $item_ty:ident)) => {
+        concat!(
+            "CollectionHandle & { get(): ",
+            $crate::__nanostores_wasm_ts_type!($item_ty),
+            "[]; getItem(key: string): ",
+            $crate::__nanostores_wasm_ts_type!($item_ty),
+            " | undefined; order(): string[]; subscribe(callback: (rows: ",
+            $crate::__nanostores_wasm_ts_type!($item_ty),
+            "[]) => void): SubscriptionHandle; subscribeKey(key: string, callback: (row: ",
+            $crate::__nanostores_wasm_ts_type!($item_ty),
+            " | undefined) => void): SubscriptionHandle; subscribeOrder(callback: (keys: string[]) => void): SubscriptionHandle }"
+        )
+    };
 }
 
 #[doc(hidden)]
@@ -812,6 +870,13 @@ macro_rules! __nanostores_wasm_projected_ts_type {
         concat!(
             "NanoReadableAtom<",
             $crate::__nanostores_wasm_ts_type!($value_ty),
+            ">"
+        )
+    };
+    (collection, ($key_ty:ident, $item_ty:ident)) => {
+        concat!(
+            "NanoCollectionProjection<",
+            $crate::__nanostores_wasm_ts_type!($item_ty),
             ">"
         )
     };

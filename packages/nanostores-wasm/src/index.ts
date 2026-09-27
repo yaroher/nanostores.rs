@@ -9,7 +9,7 @@ import {
 
 type AllKeys<T> = T extends any ? keyof T : never;
 type StringKey<T> = Extract<AllKeys<T>, string>;
-export type StoreKind = "atom" | "map" | "readable";
+export type StoreKind = "atom" | "map" | "readable" | "collection";
 export type StoreKinds<Handles> = { [Key in keyof Handles]: StoreKind };
 
 export interface SubscriptionHandle {
@@ -35,6 +35,29 @@ export interface MapHandle<T extends object = Record<string, unknown>> {
   subscribe(callback: (value: T, changedKey?: StringKey<T>) => void): SubscriptionHandle;
 }
 
+export interface CollectionHandle<V = unknown> {
+  get(): V[];
+  getItem(key: string): V | undefined;
+  order(): string[];
+  subscribe(callback: (rows: V[]) => void): SubscriptionHandle;
+  subscribeKey(key: string, callback: (row: V | undefined) => void): SubscriptionHandle;
+  subscribeOrder(callback: (keys: string[]) => void): SubscriptionHandle;
+}
+
+export interface CollectionProjection<V> {
+  /** Keys in render order — a real nanostores atom, so `useStore` works. */
+  order: WritableAtom<string[]>;
+  /**
+   * A real nanostores atom for one row. Lazy: the wasm subscription is held
+   * only while the atom has listeners. Rows are read-only from JS — mutations
+   * belong to the Rust side. A removed row notifies `undefined`.
+   *
+   * Atoms are cached per key for the lifetime of the projection; editing one
+   * row wakes only that row's atom, and a re-sort wakes only `order`.
+   */
+  getRow(key: string): ReadableAtom<V | undefined>;
+}
+
 export type ProjectedStore<Handle, Kind extends StoreKind> = Kind extends "map"
   ? Handle extends MapHandle<infer Value>
     ? MapStore<Value>
@@ -43,9 +66,13 @@ export type ProjectedStore<Handle, Kind extends StoreKind> = Kind extends "map"
     ? Handle extends ReadableHandle<infer Value>
       ? ReadableAtom<Value>
       : never
-    : Handle extends AtomHandle<infer Value>
-      ? WritableAtom<Value>
-      : never;
+    : Kind extends "collection"
+      ? Handle extends CollectionHandle<infer Value>
+        ? CollectionProjection<Value>
+        : never
+      : Handle extends AtomHandle<infer Value>
+        ? WritableAtom<Value>
+        : never;
 
 export type ProjectedStores<
   Handles,
@@ -169,10 +196,48 @@ export function projectStores<
       case "readable":
         projected[key] = projectReadable(handle as ReadableHandle<unknown>);
         break;
+      case "collection":
+        projected[key] = projectCollection(handle as CollectionHandle<unknown>);
+        break;
     }
   }
 
   return projected as ProjectedStores<Handles, Kinds>;
+}
+
+export function projectCollection<V>(handle: CollectionHandle<V>): CollectionProjection<V> {
+  const order = atom<string[]>(handle.order());
+  const applyOrder = order.set.bind(order);
+  onMount(order, () => {
+    const subscription = handle.subscribeOrder((keys) => applyOrder(keys));
+    applyOrder(handle.order());
+
+    return () => {
+      releaseSubscription(subscription);
+    };
+  });
+
+  const rows = new Map<string, ReadableAtom<V | undefined>>();
+
+  function getRow(key: string): ReadableAtom<V | undefined> {
+    let row = rows.get(key);
+    if (row) return row;
+
+    const rowAtom = atom<V | undefined>(handle.getItem(key));
+    const apply = rowAtom.set.bind(rowAtom);
+    onMount(rowAtom, () => {
+      const subscription = handle.subscribeKey(key, (value) => apply(value));
+      apply(handle.getItem(key));
+
+      return () => {
+        releaseSubscription(subscription);
+      };
+    });
+    rows.set(key, rowAtom);
+    return rowAtom;
+  }
+
+  return { order, getRow };
 }
 
 function releaseSubscription(subscription: SubscriptionHandle | undefined): void {

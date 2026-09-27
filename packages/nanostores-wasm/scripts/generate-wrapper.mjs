@@ -33,7 +33,7 @@ function parseStoreKinds(source) {
   }
 
   for (const entry of entries) {
-    if (!["atom", "map", "readable"].includes(entry.kind)) {
+    if (!["atom", "map", "readable", "collection"].includes(entry.kind)) {
       throw new Error(`unsupported store kind ${entry.kind} for ${entry.name}`);
     }
   }

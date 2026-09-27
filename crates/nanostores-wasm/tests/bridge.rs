@@ -1,7 +1,9 @@
 #![cfg(target_arch = "wasm32")]
 
-use nanostores::{NanoMap, atom, computed, map, on_set};
-use nanostores_wasm::{AtomHandle, MapHandle};
+use nanostores::{
+    Collection, NanoMap, atom, collection, computed, map, on_set,
+};
+use nanostores_wasm::{AtomHandle, CollectionHandle, MapHandle};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -226,6 +228,110 @@ fn map_echo_reuses_the_js_object_passed_to_set_but_not_set_key() {
     assert_eq!(
         from_js::<User>(value.clone()).display_name.as_deref(),
         Some("A.L.")
+    );
+}
+
+#[wasm_bindgen_test]
+fn collection_handle_row_and_order_subscriptions() {
+    let mut items = std::collections::HashMap::new();
+    items.insert(
+        1_u32,
+        User {
+            name: "one".to_owned(),
+            age: 1,
+            display_name: None,
+        },
+    );
+    items.insert(
+        2_u32,
+        User {
+            name: "two".to_owned(),
+            age: 2,
+            display_name: None,
+        },
+    );
+    let store = collection(Collection::new(items, vec![1, 2]));
+    let handle = CollectionHandle::from_collection(&store);
+
+    // Whole-list read follows the store's order.
+    let rows = from_js::<Vec<User>>(handle.get().unwrap());
+    assert_eq!(rows.iter().map(|user| user.age).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(from_js::<User>(handle.get_item("1".to_owned()).unwrap()).age, 1);
+    assert!(handle.get_item("999".to_owned()).unwrap().is_undefined());
+    assert_eq!(
+        from_js::<Vec<String>>(handle.order().unwrap()),
+        vec!["1".to_owned(), "2".to_owned()]
+    );
+
+    let row_seen = Rc::new(RefCell::new(Vec::new()));
+    let row_callback = Closure::<dyn FnMut(wasm_bindgen::JsValue)>::new({
+        let row_seen = Rc::clone(&row_seen);
+        move |value| row_seen.borrow_mut().push(from_js::<Option<User>>(value))
+    });
+    let _row_subscription = handle.subscribe_key(
+        "1".to_owned(),
+        row_callback
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone(),
+    );
+
+    let order_seen = Rc::new(RefCell::new(Vec::new()));
+    let order_callback = Closure::<dyn FnMut(wasm_bindgen::JsValue)>::new({
+        let order_seen = Rc::clone(&order_seen);
+        move |value| order_seen.borrow_mut().push(from_js::<Vec<String>>(value))
+    });
+    let _order_subscription = handle.subscribe_order(
+        order_callback
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone(),
+    );
+
+    // Editing ANOTHER row wakes neither the row listener nor order.
+    store.update_item(2, |user| {
+        user.age = 22;
+        true
+    });
+    assert_eq!(row_seen.borrow().len(), 0);
+    assert_eq!(order_seen.borrow().len(), 0);
+
+    // Editing the row wakes only its own listener.
+    store.update_item(1, |user| {
+        user.age = 11;
+        true
+    });
+    assert_eq!(
+        row_seen
+            .borrow()
+            .iter()
+            .map(|user| user.as_ref().map(|user| user.age))
+            .collect::<Vec<_>>(),
+        vec![Some(11)]
+    );
+    assert_eq!(order_seen.borrow().len(), 0);
+
+    // Re-sorting wakes only the order listener, with the new key order.
+    store.set_order(vec![2, 1]);
+    assert_eq!(row_seen.borrow().len(), 1, "re-sort must not wake the row");
+    assert_eq!(
+        order_seen
+            .borrow()
+            .iter()
+            .map(|keys| keys.join(","))
+            .collect::<Vec<_>>(),
+        vec!["2,1".to_owned()]
+    );
+
+    // Removing the row notifies its listener with undefined.
+    store.remove_item(&1);
+    assert_eq!(
+        row_seen
+            .borrow()
+            .iter()
+            .map(|user| user.as_ref().map(|user| user.age))
+            .collect::<Vec<_>>(),
+        vec![Some(11), None]
     );
 }
 

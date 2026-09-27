@@ -4,7 +4,7 @@
 //! and `tick_*` functions that mutate state from the Rust side so that only
 //! the notify direction crosses the JS/wasm boundary.
 
-use nanostores::{Atom, NanoMap, batched};
+use nanostores::{Atom, Collection, NanoMap, batched, collection};
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
@@ -44,6 +44,16 @@ fn rows(count: u32, variant: u32) -> RowsPayload {
     }
 }
 
+fn bench_collection() -> nanostores::CollectionStore<u32, Row> {
+    let mut items = std::collections::HashMap::with_capacity(1250);
+    let mut order = Vec::with_capacity(1250);
+    for id in 0..1250_u32 {
+        items.insert(id, row(id, 0));
+        order.push(id);
+    }
+    collection(Collection::new(items, order))
+}
+
 nanostores_wasm::define_stores! {
     pub fn stores() -> StoreHandles {
         atom scalar: i32 = 0;
@@ -52,6 +62,7 @@ nanostores_wasm::define_stores! {
         atom medium: RowsPayload = rows(120, 0);
         atom large: RowsPayload = rows(1250, 0);
         readable batched_scalar: i32 = batched((scalar().clone(),), |value| value);
+        collection list: (u32, Row) = bench_collection();
     }
 }
 
@@ -93,4 +104,26 @@ fn flip_first_row(store: &Atom<RowsPayload>) {
     first.id = first.id.wrapping_add(1);
     first.active = !first.active;
     store.set(value);
+}
+
+/// Edit ONE row of the 1250-row collection: only that row's subscribers are
+/// notified, and only that row crosses the boundary.
+#[wasm_bindgen]
+pub fn tick_list_row() {
+    list().update_item(0, |row| {
+        row.id = row.id.wrapping_add(1);
+        row.active = !row.active;
+        true
+    });
+}
+
+/// Rotate the collection's order: only the key array crosses.
+#[wasm_bindgen]
+pub fn tick_list_order() {
+    let mut order = list().get().order().to_vec();
+    if let Some(first) = order.first().cloned() {
+        order.remove(0);
+        order.push(first);
+        list().set_order(order);
+    }
 }
