@@ -1,5 +1,5 @@
 use crate::Subscription;
-use crate::store::{Listener, StoreInner, StoreLike};
+use crate::store::{Listener, NotifyScope, StoreInner, StoreLike};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -115,55 +115,121 @@ where
         self.inner.get()
     }
 
+    /// One item, cloned under the read lock — O(row), not O(collection).
     pub fn get_item(&self, key: &K) -> Option<V> {
-        self.inner.get().get(key).cloned()
+        self.inner.read_value(|next| next.get(key).cloned())
+    }
+
+    /// Keys in render order, O(keys) — does not clone the items.
+    pub fn order(&self) -> Vec<K> {
+        self.inner.read_value(|next| next.order().to_vec())
     }
 
     /// Insert or replace one item. Notifies under this item's key only —
-    /// listeners of other rows stay asleep. An item equal to the stored one
-    /// notifies nobody (the store compares before writing).
+    /// listeners of other rows stay asleep. Inserting a NEW key also
+    /// notifies under [`ORDER_KEY`] (the list grew). An item equal to the
+    /// stored one notifies nobody.
     pub fn set_item(&self, key: K, value: V) {
-        let mut next = self.inner.get();
-        if !next.items.contains_key(&key) {
-            next.order.push(key.clone());
+        let is_new = self.inner.read_value(|next| !next.items.contains_key(&key));
+        let scope = if is_new {
+            NotifyScope::Keys(vec![key.to_string(), ORDER_KEY.to_owned()])
+        } else {
+            NotifyScope::Keys(vec![key.to_string()])
+        };
+
+        match self.inner.mutate_in_place(scope.clone(), |next| {
+            if !next.items.contains_key(&key) {
+                next.order.push(key.clone());
+                next.items.insert(key.clone(), value.clone());
+                return true;
+            }
+            if next.items.get(&key) == Some(&value) {
+                return false;
+            }
+            next.items.insert(key.clone(), value.clone());
+            true
+        }) {
+            Ok(_) => {}
+            Err(apply) => {
+                let mut next = self.inner.get();
+                if apply(&mut next) {
+                    self.inner.commit(next, scope, true);
+                }
+            }
         }
-        next.items.insert(key.clone(), value);
-        self.inner.set_value(next, Some(key.to_string()), true);
     }
 
     /// Change one item in place. The closure returns `false` to abort (nothing
     /// is written, nobody is notified) — that is how a no-op update avoids
-    /// waking the row.
+    /// waking the row. Missing key: no-op.
     pub fn update_item<F>(&self, key: K, update: F)
     where
         F: FnOnce(&mut V) -> bool,
     {
-        let mut next = self.inner.get();
-        let Some(item) = next.items.get_mut(&key) else {
-            return;
-        };
-        if !update(item) {
-            return;
+        match self
+            .inner
+            .mutate_in_place(NotifyScope::Keys(vec![key.to_string()]), |next| {
+                let Some(item) = next.items.get_mut(&key) else {
+                    return false;
+                };
+                update(item)
+            }) {
+            Ok(_) => {}
+            Err(apply) => {
+                let mut next = self.inner.get();
+                if apply(&mut next) {
+                    self.inner
+                        .commit(next, NotifyScope::Keys(vec![key.to_string()]), true);
+                }
+            }
         }
-        self.inner.set_value(next, Some(key.to_string()), true);
     }
 
-    /// Drop one item. Order shrinks with it; notification carries the item's key.
+    /// Drop one item. Order shrinks with it; the notification reaches both
+    /// the item's key (row listeners see `None`) and [`ORDER_KEY`].
     pub fn remove_item(&self, key: &K) {
-        let mut next = self.inner.get();
-        if next.items.remove(key).is_none() {
-            return;
+        let scope = NotifyScope::Keys(vec![key.to_string(), ORDER_KEY.to_owned()]);
+
+        match self.inner.mutate_in_place(scope.clone(), |next| {
+            let had_item = next.items.remove(key).is_some();
+            let had_order = next.order.iter().any(|k| k == key);
+            if had_order {
+                next.order.retain(|k| k != key);
+            }
+            had_item || had_order
+        }) {
+            Ok(_) => {}
+            Err(apply) => {
+                let mut next = self.inner.get();
+                if apply(&mut next) {
+                    self.inner.commit(next, scope, true);
+                }
+            }
         }
-        next.order.retain(|k| k != key);
-        self.inner.set_value(next, Some(key.to_string()), true);
     }
 
     /// Replace the order (sorting, filtering). Announced under [`ORDER_KEY`]:
-    /// a listener drawing a single row is not woken by a re-sort.
+    /// a listener drawing a single row is not woken by a re-sort. An order
+    /// equal to the current one notifies nobody.
     pub fn set_order(&self, order: Vec<K>) {
-        let mut next = self.inner.get();
-        next.order = order;
-        self.inner.set_value(next, Some(ORDER_KEY.to_owned()), true);
+        let scope = NotifyScope::Keys(vec![ORDER_KEY.to_owned()]);
+
+        match self.inner.mutate_in_place(scope.clone(), |next| {
+            if next.order.len() == order.len() && next.order.iter().zip(&order).all(|(a, b)| a == b)
+            {
+                return false;
+            }
+            next.order = order.clone();
+            true
+        }) {
+            Ok(_) => {}
+            Err(apply) => {
+                let mut next = self.inner.get();
+                if apply(&mut next) {
+                    self.inner.commit(next, scope, true);
+                }
+            }
+        }
     }
 
     /// Replace everything (initial load, reset). No key: this is not a change
@@ -337,5 +403,61 @@ mod tests {
 
         let seen: Vec<String> = store.get().iter().map(|(_, value)| value.clone()).collect();
         assert_eq!(seen, vec!["two".to_string(), "one".to_string()]);
+    }
+
+    /// Growing and shrinking the list is a change to the ORDER too: the
+    /// order listener must hear about inserts and removals, not just
+    /// re-sorts (the JS projection's `order` atom depends on this).
+    #[test]
+    fn insert_and_remove_notify_the_order_listener() {
+        let store = store();
+        store.set_item(1, "one".into());
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let order_seen = Arc::clone(&order);
+        let _order = store.listen_order(move |snapshot, _| {
+            order_seen
+                .lock()
+                .unwrap()
+                .push(snapshot.order().to_vec());
+        });
+
+        store.set_item(2, "two".into());
+        flush();
+        assert_eq!(*order.lock().unwrap(), vec![vec![1, 2]], "insert grows the order");
+
+        // Replacing an existing item does NOT touch the order.
+        store.set_item(2, "TWO".into());
+        flush();
+        assert_eq!(order.lock().unwrap().len(), 1, "replace leaves the order alone");
+
+        store.remove_item(&2);
+        flush();
+        assert_eq!(*order.lock().unwrap(), vec![vec![1, 2], vec![1]], "remove shrinks the order");
+    }
+
+    /// A set_item equal to the stored row writes nothing and wakes nobody.
+    #[test]
+    fn equal_set_item_notifies_nobody() {
+        let store = store();
+        store.set_item(1, "one".into());
+
+        let woken = Arc::new(Mutex::new(0));
+        let counter = Arc::clone(&woken);
+        let _sub = store.listen_key(&1, move |_, _| {
+            *counter.lock().unwrap() += 1;
+        });
+        let order_woken = Arc::new(Mutex::new(0));
+        let order_counter = Arc::clone(&order_woken);
+        let _order = store.listen_order(move |_, _| {
+            *order_counter.lock().unwrap() += 1;
+        });
+
+        store.set_item(1, "one".into());
+        store.set_order(vec![1]);
+        flush();
+
+        assert_eq!(*woken.lock().unwrap(), 0);
+        assert_eq!(*order_woken.lock().unwrap(), 0, "equal order must not notify either");
     }
 }

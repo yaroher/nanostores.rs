@@ -120,7 +120,7 @@ pub fn tick_list_row() {
 /// Rotate the collection's order: only the key array crosses.
 #[wasm_bindgen]
 pub fn tick_list_order() {
-    let mut order = list().get().order().to_vec();
+    let mut order = list().order();
     if let Some(first) = order.first().cloned() {
         order.remove(0);
         order.push(first);

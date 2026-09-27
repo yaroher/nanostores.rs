@@ -110,10 +110,10 @@ where
 
     fn order(&self) -> Result<JsValue, JsValue> {
         // Keys cross as strings, matching the string-keyed getItem /
-        // subscribeKey addressing (K is `Display`).
+        // subscribeKey addressing (K is `Display`). O(keys): the items are
+        // not touched.
         let keys: Vec<String> = self
             .store
-            .get()
             .order()
             .iter()
             .map(|key| key.to_string())

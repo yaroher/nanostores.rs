@@ -5,6 +5,28 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 pub type Listener<T> = dyn Fn(&T, Option<&str>) + Send + Sync + 'static;
 
+/// Which listeners a notification reaches.
+///
+/// `All` wakes everyone (listeners see `changed_key: None`). `Keys` wakes
+/// only listeners filtered on one of the keys — a collection insert or
+/// removal announces both the item's key and `ORDER_KEY`, so row listeners
+/// and the order listener each hear their own part. Listeners see the
+/// first key as `changed_key`.
+#[derive(Clone, Debug)]
+pub(crate) enum NotifyScope {
+    All,
+    Keys(Vec<String>),
+}
+
+impl NotifyScope {
+    fn listener_changed_key(&self) -> Option<&str> {
+        match self {
+            NotifyScope::All => None,
+            NotifyScope::Keys(keys) => keys.first().map(String::as_str),
+        }
+    }
+}
+
 type StartHook = dyn Fn() + Send + Sync + 'static;
 type StopHook = dyn Fn() + Send + Sync + 'static;
 type MountHook = dyn Fn() -> Subscription + Send + Sync + 'static;
@@ -105,7 +127,7 @@ pub(crate) struct StoreInner<T> {
 struct QueuedNotification<T> {
     seq: u64,
     value: T,
-    changed_key: Option<String>,
+    scope: NotifyScope,
 }
 
 impl<T> StoreInner<T>
@@ -250,10 +272,22 @@ where
         changed_key: Option<String>,
         run_set_hooks: bool,
     ) -> bool {
+        let scope = match changed_key {
+            None => NotifyScope::All,
+            Some(key) => NotifyScope::Keys(vec![key]),
+        };
+        self.commit(value, scope, run_set_hooks)
+    }
+
+    /// The full write path: set hooks may transform or abort, the new value
+    /// is compared and stored, notify hooks may transform again, and the
+    /// notification reaches the listeners selected by `scope`.
+    pub(crate) fn commit(&self, value: T, scope: NotifyScope, run_set_hooks: bool) -> bool {
         let mut next = value;
 
         if run_set_hooks {
-            let mut context = SetContext::new(next, changed_key.clone());
+            let mut context =
+                SetContext::new(next, scope.listener_changed_key().map(str::to_owned));
             for hook in self.snapshot_set_hooks() {
                 hook(&mut context);
                 if context.is_aborted() {
@@ -276,7 +310,8 @@ where
             self.write_seq.fetch_add(1, Ordering::SeqCst) + 1
         };
 
-        let mut notify_context = NotifyContext::new(next, changed_key.clone());
+        let mut notify_context =
+            NotifyContext::new(next, scope.listener_changed_key().map(str::to_owned));
         for hook in self.snapshot_notify_hooks() {
             hook(&mut notify_context);
             if notify_context.is_aborted() {
@@ -296,19 +331,61 @@ where
             }
         }
 
-        self.notify_listeners(seq, notify_value, changed_key);
+        self.notify_listeners(seq, notify_value, scope);
         true
     }
 
-    fn notify_listeners(&self, seq: u64, value: T, changed_key: Option<String>) {
+    /// In-place write path: mutates the stored value under the write lock
+    /// (no pre-clone, no deep equality passes — the closure itself decides
+    /// whether anything changed) and notifies with a single snapshot clone.
+    ///
+    /// Returns `Ok(handled)` when the call was handled here, or `Err` with
+    /// the untouched closure when set or notify hooks are registered and
+    /// the caller must run the copy-on-write [`StoreInner::commit`] path
+    /// instead (where those hooks execute). The closure is handed back so
+    /// an `FnOnce` is not lost to a declined fast path.
+    pub(crate) fn mutate_in_place<F>(
+        &self,
+        scope: NotifyScope,
+        mutate: F,
+    ) -> Result<bool, impl FnOnce(&mut T) -> bool>
+    where
+        F: FnOnce(&mut T) -> bool,
+    {
+        if self.has_set_or_notify_hooks() {
+            return Err(mutate);
+        }
+
+        let (seq, snapshot) = {
+            let mut current = self.value.write().expect("store value poisoned");
+            if !mutate(&mut current) {
+                return Ok(true);
+            }
+            let snapshot = current.clone();
+            (self.write_seq.fetch_add(1, Ordering::SeqCst) + 1, snapshot)
+        };
+
+        self.notify_listeners(seq, snapshot, scope);
+        Ok(true)
+    }
+
+    /// Run `read` against the stored value under the read lock — a cheap
+    /// existence or content peek without cloning the value.
+    pub(crate) fn read_value<R>(&self, read: impl FnOnce(&T) -> R) -> R {
+        let value = self.value.read().expect("store value poisoned");
+        read(&value)
+    }
+
+    fn has_set_or_notify_hooks(&self) -> bool {
+        let state = self.state.lock().expect("store state poisoned");
+        !state.set_hooks.is_empty() || !state.notify_hooks.is_empty()
+    }
+
+    fn notify_listeners(&self, seq: u64, value: T, scope: NotifyScope) {
         self.notify_queue
             .lock()
             .expect("store notify queue poisoned")
-            .push_back(QueuedNotification {
-                seq,
-                value,
-                changed_key,
-            });
+            .push_back(QueuedNotification { seq, value, scope });
 
         // Single drainer: whichever thread wins delivers everything queued
         // (including notifications enqueued by other threads or reentrant
@@ -332,13 +409,13 @@ where
                 }
                 self.delivered_seq.store(item.seq, Ordering::SeqCst);
 
-                let changed_key = item.changed_key.as_deref();
+                let changed_key = item.scope.listener_changed_key();
                 let listeners = {
                     let state = self.state.lock().expect("store state poisoned");
                     state
                         .listeners
                         .iter()
-                        .filter(|entry| listener_matches(entry.keys.as_deref(), changed_key))
+                        .filter(|entry| listener_matches(entry.keys.as_deref(), &item.scope))
                         .map(|entry| Arc::clone(&entry.listener))
                         .collect::<Vec<_>>()
                 };
@@ -462,11 +539,13 @@ where
     }
 }
 
-fn listener_matches(keys: Option<&[String]>, changed_key: Option<&str>) -> bool {
-    match (keys, changed_key) {
+fn listener_matches(keys: Option<&[String]>, scope: &NotifyScope) -> bool {
+    match (keys, scope) {
         (None, _) => true,
-        (Some(_), None) => true,
-        (Some(keys), Some(changed_key)) => keys.iter().any(|key| key == changed_key),
+        (Some(_), NotifyScope::All) => true,
+        (Some(listener_keys), NotifyScope::Keys(changed)) => changed
+            .iter()
+            .any(|changed_key| listener_keys.iter().any(|key| key == changed_key)),
     }
 }
 

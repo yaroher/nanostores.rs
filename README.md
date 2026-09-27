@@ -375,15 +375,15 @@ Collections, measured on a 1250-row store:
 
 | scenario | µs per op | what crosses | who wakes |
 | --- | ---: | --- | --- |
-| edit one row | ~110 | that row only (~1 µs) | that row's listeners only |
-| re-sort | ~360 | key array only | `order` listeners only |
+| edit one row | ~39 | that row only (~1 µs) | that row's listeners only |
+| re-sort | ~270 | key array only | `order` listeners only |
 | whole-list atom write (for contrast) | ~660 | the whole list | every listener |
 
 The boundary does its job: a row edit wakes exactly one row (verified by
-counter — 100 edits, 100 callbacks, neighbours and order asleep). The ~110 µs
-is Rust-side copy-on-write inside the store (full-collection clone plus two
-deep `PartialEq` passes per mutation), not serialization — see the roadmap
-item on in-place collection updates.
+counter — 100 edits, 100 callbacks, neighbours and order asleep). The ~39 µs
+left is a single notification-snapshot clone in Rust (in-place mutation
+landed; the re-sort cost is mostly serializing the key array itself).
+Inserts and removals notify both the row and `order`.
 
 ### Divergences from JS nanostores (v0.1)
 
@@ -397,11 +397,10 @@ item on in-place collection updates.
 
 - [ ] `deepMap` + `setPath` / `getPath`
 - [ ] `effect`, `keepMount` / `cleanStores` test utilities
-- [ ] in-place `CollectionStore` mutation: `update_item` / `set_order` still
-      clone the whole collection and run two deep `PartialEq` passes per
-      mutation (~110 µs per row edit at 1250 rows, vs ~1 µs of actual
-      boundary work) — an in-place write path under the store lock would
-      make row edits O(row), not O(collection)
+- [ ] Arc-shared notification snapshots: collection mutations still clone
+      the whole value once per notification (~39 µs per row edit at 1250
+      rows); storing `Arc<T>` internally would make notifications
+      zero-copy and `get()` O(1)
 - [ ] **Kotlin/Android bindings.** Planned layering (validated by research,
       not yet by code): a platform-agnostic `nanostores-erased` crate —
       values as JSON strings, object-safe `ErasedStore`/`ErasedListener`
