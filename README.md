@@ -270,8 +270,12 @@ wasm-bindgen merges its exports into the app's `pkg`.
 - values cross via `serde-wasm-bindgen` (plain JS objects, no JSON strings);
   `HashMap` serializes as a plain object,
 - `None` ↔ `undefined` (not `null`),
-- every crossing creates a fresh JS object — change detection (`PartialEq`
-  skip) happens on the Rust side,
+- change detection (`PartialEq` skip) happens on the Rust side, before any
+  serialization,
+- notifications for JS-originated whole-value writes reuse the exact object
+  that was passed to `set` when the Rust store accepts it unchanged — the
+  same aliasing semantics as plain JS nanostores; `setKey` and
+  Rust-originated changes always cross with a fresh object,
 - key names follow serde attributes: `#[serde(rename_all = "camelCase")]`,
   `#[serde(rename = "...")]` — Rust and TS agree on strings,
 - custom value types in `define_stores!` / `export_stores!` must derive
@@ -290,18 +294,24 @@ tables and a machine-readable `BENCH_JSON` line.
 Writes (µs per op, lower is better; median of 5 rounds,
 Chrome 153 headless, i5-14600K):
 
-| payload | JS `atom.set` | handle, no listeners (in) | Rust-side tick (out) | handle, 1 listener (in+out) | projection (full round trip) |
+| payload | JS `atom.set` | handle, no listeners (in) | Rust-side tick (out) | handle, 1 listener | projection (what apps use) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| scalar (1 B) | 0.03 | 0.05 | 0.11 | 0.16 | 0.14 |
-| string (44 B) | 0.04 | 0.15 | 0.40 | 0.64 | 0.47 |
-| object (69 B) | 0.04 | 1.05 | 0.66 | 1.57 | 1.07 |
-| 120 objects (8.8 KB) | 0.04 | 41.3 | 65.1 | 155.7 | 101.9 |
-| 1250 objects (94 KB) | 0.04 | 451.5 | 643.9 | 1119.8 | 1043.8 |
+| scalar (1 B) | 0.03 | 0.06 | 0.11 | 0.18 | 0.17 |
+| string (44 B) | 0.05 | 0.32 | 0.33 | 0.36 | 0.32 |
+| object (69 B) | 0.04 | 0.48 | 0.76 | 0.72 | 0.63 |
+| 120 objects (8.8 KB) | 0.04 | 47.8 | 70.5 | 51.3 | 49.3 |
+| 1250 objects (94 KB) | 0.04 | 480.1 | 702.3 | 497.3 | 520.0 |
+
+JS-initiated writes (the last two columns) cost about the same as the input
+crossing alone: when the Rust store accepts the value unchanged, the
+notification reuses the object that was passed to `set` instead of
+re-serializing it. Rust-originated changes pay the full output serialization
+(the "out" column).
 
 Reads (µs per op): the projection serves a cached JS value, so reads never
 cross the boundary and stay payload-independent — `get()` on the projection
-of the 94 KB store costs 0.69 µs (vs 0.03 µs for a plain JS atom), while
-`get()` on the raw handle pays the full serialization (599.5 µs).
+of the 94 KB store costs 0.88 µs (vs 0.04 µs for a plain JS atom), while
+`get()` on the raw handle pays the full serialization (676.1 µs).
 
 Behaviour (counted, not timed):
 
@@ -318,9 +328,10 @@ Reading the numbers:
 
 - the JS baseline swaps references, so its cost is payload-independent;
   the bridge pays serde-wasm-bindgen per crossing, linear in payload size,
-- a full JS → Rust → JS round trip costs ~1 µs for scalar/small state —
-  noise next to any render — and ~1 ms for 94 KB, which is the honest price
-  of moving that much state across the boundary per write,
+- a JS-initiated write costs ~0.2–0.6 µs for scalar/small state — noise
+  next to any render — and ~0.5 ms for 94 KB, which is the honest price of
+  moving that much state across the boundary per write; Rust-originated
+  changes pay ~0.7 ms (full output serialization),
 - reads and re-renders never cross: components subscribe to a real JS
   nanostore holding the last notified value,
 - `batched` coalesces a burst of writes into one notification per flush, and

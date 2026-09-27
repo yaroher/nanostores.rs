@@ -52,6 +52,13 @@ where
     T: Clone + PartialEq + Send + Sync + 'static,
 {
     store: Atom<T>,
+    /// The last value accepted from JS, paired with the exact `JsValue` it
+    /// arrived in. When a notification carries an equal value, that `JsValue`
+    /// is reused instead of re-serializing — a JS-initiated write then pays
+    /// the input crossing only. Content stays correct because reuse is
+    /// guarded by `PartialEq`; the aliasing semantics match plain JS
+    /// nanostores, whose stores also hold the object the caller passed in.
+    echo: EchoCell<T>,
 }
 
 struct ReadableAtomProjection<S, T> {
@@ -64,6 +71,10 @@ where
     T: NanoMap + Clone + PartialEq + Send + Sync + 'static,
 {
     store: MapStore<T>,
+    /// Same reuse as [`WritableAtomProjection::echo`], for whole-map `set`
+    /// only — `setKey` notifications carry the full map and always
+    /// re-serialize.
+    echo: EchoCell<T>,
 }
 
 struct CollectionProjection<K, V>
@@ -138,14 +149,24 @@ where
     }
 
     fn set(&self, value: JsValue) -> Result<(), JsValue> {
-        self.store.set(from_js(value)?);
+        let parsed: T = from_js(value.clone())?;
+        remember_echo(&self.echo, parsed.clone(), value);
+        self.store.set(parsed);
         Ok(())
     }
 
     fn subscribe(&self, callback: Function) -> Subscription {
         let callback = callback_cell(callback);
-        self.store
-            .listen(move |value, _| call_atom(&callback, value))
+        let echo = Arc::clone(&self.echo);
+        self.store.listen(move |value, _| {
+            let echo_value = take_echo(&echo, value);
+            match echo_value {
+                Some(js) => call_locked(&callback, |callback| {
+                    callback.call1(&JsValue::NULL, &js)
+                }),
+                None => call_atom(&callback, value),
+            }
+        })
     }
 }
 
@@ -178,7 +199,9 @@ where
     }
 
     fn set(&self, value: JsValue) -> Result<(), JsValue> {
-        self.store.set(from_js(value)?);
+        let parsed: T = from_js(value.clone())?;
+        remember_echo(&self.echo, parsed.clone(), value);
+        self.store.set(parsed);
         Ok(())
     }
 
@@ -190,8 +213,20 @@ where
 
     fn subscribe(&self, callback: Function) -> Subscription {
         let callback = callback_cell(callback);
-        self.store
-            .listen(move |value, changed_key| call_map(&callback, value, changed_key))
+        let echo = Arc::clone(&self.echo);
+        self.store.listen(move |value, changed_key| {
+            let echo_value = if changed_key.is_none() {
+                take_echo(&echo, value)
+            } else {
+                None
+            };
+            match echo_value {
+                Some(js) => call_locked(&callback, |callback| {
+                    callback.call2(&JsValue::NULL, &js, &JsValue::UNDEFINED)
+                }),
+                None => call_map(&callback, value, changed_key),
+            }
+        })
     }
 }
 
@@ -209,6 +244,7 @@ impl AtomHandle {
         Self {
             inner: Arc::new(WritableAtomProjection {
                 store: store.clone(),
+                echo: echo_cell(),
             }),
         }
     }
@@ -257,6 +293,7 @@ impl MapHandle {
         Self {
             inner: Arc::new(MapProjection {
                 store: store.clone(),
+                echo: echo_cell(),
             }),
         }
     }
@@ -459,6 +496,35 @@ impl Scheduler for MicrotaskScheduler {
 
 fn callback_cell(callback: Function) -> Arc<Mutex<SendWrapper<Function>>> {
     Arc::new(Mutex::new(SendWrapper::new(callback)))
+}
+
+/// Last JS-originated value of a store, kept with its incoming `JsValue`.
+type EchoCell<T> = Arc<Mutex<Option<SendWrapper<(T, JsValue)>>>>;
+
+fn echo_cell<T>() -> EchoCell<T> {
+    Arc::new(Mutex::new(None))
+}
+
+fn remember_echo<T>(cell: &EchoCell<T>, value: T, js: JsValue) {
+    *cell.lock().expect("echo cell poisoned") = Some(SendWrapper::new((value, js)));
+}
+
+/// Returns the remembered `JsValue` when `value` equals the last accepted
+/// JS-originated value, so a notification can reuse it instead of paying
+/// for serialization. The lock is released before any JS runs: a reentrant
+/// `set` from inside a listener must not deadlock.
+fn take_echo<T>(cell: &EchoCell<T>, value: &T) -> Option<JsValue>
+where
+    T: PartialEq,
+{
+    let guard = cell.lock().expect("echo cell poisoned");
+    let remembered = guard.as_ref()?;
+    let (parsed, js) = &**remembered;
+    if parsed == value {
+        Some(js.clone())
+    } else {
+        None
+    }
 }
 
 fn call_atom<T>(callback: &Arc<Mutex<SendWrapper<Function>>>, value: &T)

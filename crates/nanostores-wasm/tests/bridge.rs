@@ -121,6 +121,114 @@ fn readable_atom_handle_rejects_writes() {
     assert_eq!(doubled.get(), 4);
 }
 
+#[wasm_bindgen_test]
+fn atom_echo_reuses_the_js_object_passed_to_set() {
+    let user = atom(User {
+        name: "Ada".to_owned(),
+        age: 36,
+        display_name: None,
+    });
+    let handle = AtomHandle::from_atom(&user);
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let callback = Closure::<dyn FnMut(wasm_bindgen::JsValue)>::new({
+        let seen = Rc::clone(&seen);
+        move |value| seen.borrow_mut().push(value)
+    });
+    let _subscription = handle.subscribe(
+        callback
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone(),
+    );
+
+    // Equal content, distinct objects: the notification must carry the exact
+    // object handed to set (echo reuse), not a re-serialized copy.
+    let first = to_js(&User {
+        name: "Ada".to_owned(),
+        age: 37,
+        display_name: None,
+    });
+    handle.set(first.clone()).unwrap();
+
+    // Content-equal write: skipped by Rust-side change detection, no
+    // notification at all.
+    let second = to_js(&User {
+        name: "Ada".to_owned(),
+        age: 37,
+        display_name: None,
+    });
+    handle.set(second.clone()).unwrap();
+
+    // A Rust-side write of different content still crosses with a fresh
+    // serialization and must not reuse the echoed object.
+    user.set(User {
+        name: "Ada".to_owned(),
+        age: 38,
+        display_name: None,
+    });
+
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(from_js::<User>(seen[0].clone()).age, 37);
+    assert!(js_sys::Object::is(&seen[0], &first));
+    assert!(!js_sys::Object::is(&seen[1], &second));
+    assert_eq!(from_js::<User>(seen[1].clone()).age, 38);
+}
+
+#[wasm_bindgen_test]
+fn map_echo_reuses_the_js_object_passed_to_set_but_not_set_key() {
+    let user = map(User {
+        name: "Ada".to_owned(),
+        age: 36,
+        display_name: None,
+    });
+    let handle = MapHandle::from_map(&user);
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let callback = Closure::<dyn FnMut(wasm_bindgen::JsValue, wasm_bindgen::JsValue)>::new({
+        let seen = Rc::clone(&seen);
+        move |value, key| seen.borrow_mut().push((value, key))
+    });
+    let _subscription = handle.subscribe(
+        callback
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone(),
+    );
+
+    let whole = to_js(&User {
+        name: "Ada".to_owned(),
+        age: 37,
+        display_name: None,
+    });
+    handle.set(whole.clone()).unwrap();
+
+    {
+        let mut guard = seen.borrow_mut();
+        assert_eq!(guard.len(), 1);
+        let (value, key) = guard.remove(0);
+        assert!(js_sys::Object::is(&value, &whole));
+        assert!(key.is_undefined());
+    }
+
+    // setKey mutates one field in Rust; the notification re-serializes the
+    // full map and must NOT reuse the object passed to the earlier set.
+    handle
+        .set_key("displayName".to_owned(), to_js(&"A.L.".to_owned()))
+        .unwrap();
+
+    let guard = seen.borrow();
+    assert_eq!(guard.len(), 1);
+    let (value, key) = (&guard[0].0, &guard[0].1);
+    assert!(!js_sys::Object::is(value, &whole));
+    assert_eq!(key.as_string().as_deref(), Some("displayName"));
+    assert_eq!(
+        from_js::<User>(value.clone()).display_name.as_deref(),
+        Some("A.L.")
+    );
+}
+
 fn to_js<T>(value: &T) -> wasm_bindgen::JsValue
 where
     T: Serialize,
