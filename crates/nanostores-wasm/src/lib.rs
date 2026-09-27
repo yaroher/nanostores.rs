@@ -20,6 +20,54 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn error(value: &JsValue);
+    #[wasm_bindgen(js_namespace = console)]
+    fn warn(value: &str);
+    #[wasm_bindgen(js_namespace = performance)]
+    fn now() -> f64;
+}
+
+/// Warn once when a single boundary crossing is slower than this many
+/// microseconds — a large value pays serialization proportional to its size
+/// on every crossing, and the fix is a different store shape, not a faster
+/// bridge. Debug builds only.
+static BOUNDARY_WARN_MICROS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(100);
+
+/// Override the slow-crossing warning threshold (microseconds); `0` disables
+/// the warning. Mostly useful for tests and for tuning against a real app.
+pub fn set_boundary_warn_threshold(micros: u64) {
+    BOUNDARY_WARN_MICROS.store(micros, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(debug_assertions)]
+fn warn_slow_crossing(direction: &str, elapsed_ms: f64) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let message = format!(
+        "nanostores-wasm: a {} crossing took {:.0} µs — the value is probably \
+         large, and every write pays serialization proportional to its size. \
+         Prefer CollectionStore for lists (per-row notifications), setKey for \
+         partial map updates, and batched to coalesce bursts. \
+         [debug builds only; warned once per session]",
+        direction,
+        elapsed_ms * 1000.0,
+    );
+    warn(&message);
+}
+
+#[cfg(debug_assertions)]
+fn check_crossing_time(direction: &str, started_ms: f64) {
+    let threshold = BOUNDARY_WARN_MICROS.load(std::sync::atomic::Ordering::Relaxed);
+    if threshold == 0 {
+        return;
+    }
+    let elapsed_ms = now() - started_ms;
+    if elapsed_ms * 1000.0 > threshold as f64 {
+        warn_slow_crossing(direction, elapsed_ms);
+    }
 }
 
 trait ErasedAtom: Send + Sync {
@@ -598,15 +646,25 @@ fn to_js<T>(value: &T) -> Result<JsValue, JsValue>
 where
     T: Serialize,
 {
+    #[cfg(debug_assertions)]
+    let started = now();
     let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-    value.serialize(&serializer).map_err(js_error)
+    let result = value.serialize(&serializer).map_err(js_error);
+    #[cfg(debug_assertions)]
+    check_crossing_time("wasm → JS", started);
+    result
 }
 
 fn from_js<T>(value: JsValue) -> Result<T, JsValue>
 where
     T: DeserializeOwned,
 {
-    serde_wasm_bindgen::from_value(value).map_err(js_error)
+    #[cfg(debug_assertions)]
+    let started = now();
+    let result = serde_wasm_bindgen::from_value(value).map_err(js_error);
+    #[cfg(debug_assertions)]
+    check_crossing_time("JS → wasm", started);
+    result
 }
 
 fn js_error(error: impl Display) -> JsValue {

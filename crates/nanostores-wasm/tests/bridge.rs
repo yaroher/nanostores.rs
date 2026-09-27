@@ -3,8 +3,7 @@
 use nanostores::{
     Collection, NanoMap, atom, collection, computed, map, on_set,
 };
-use nanostores_wasm::{AtomHandle, CollectionHandle, MapHandle};
-use serde::{Deserialize, Serialize};
+use nanostores_wasm::{AtomHandle, CollectionHandle, MapHandle};use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
@@ -332,6 +331,54 @@ fn collection_handle_row_and_order_subscriptions() {
             .map(|user| user.as_ref().map(|user| user.age))
             .collect::<Vec<_>>(),
         vec![Some(11), None]
+    );
+}
+
+/// A slow boundary crossing warns once per session (debug builds only).
+#[wasm_bindgen_test]
+fn slow_crossing_warns_once() {
+    js_sys::eval(
+        r#"(globalThis.__warns = [], console.warn = (...args) => { globalThis.__warns.push(String(args[0])); })"#,
+    )
+    .unwrap();
+    nanostores_wasm::set_boundary_warn_threshold(1);
+
+    // 500 users ≈ 30KB — well above any plausible crossing time in debug.
+    let users: Vec<User> = (0..500)
+        .map(|id| User {
+            name: format!("user-{id}"),
+            age: id,
+            display_name: Some(format!("User {id}")),
+        })
+        .collect();
+    let store = atom(users);
+    let handle = AtomHandle::from_atom(&store);
+
+    let next: Vec<User> = (0..500)
+        .map(|id| User {
+            name: format!("user-{id}!"),
+            age: id,
+            display_name: Some(format!("User {id}!")),
+        })
+        .collect();
+
+    handle.set(to_js(&next)).unwrap();
+    handle.set(to_js(&next)).unwrap();
+    let _ = handle.get();
+
+    let count = js_sys::eval("globalThis.__warns.length")
+        .unwrap()
+        .as_f64();
+    assert_eq!(count, Some(1.0), "exactly one warning expected, got {count:?}");
+
+    let warned = js_sys::eval("globalThis.__warns.join('\\n')")
+        .unwrap()
+        .as_string()
+        .unwrap_or_default();
+    assert!(warned.contains("µs"), "warning should mention the cost: {warned}");
+    assert!(
+        warned.contains("CollectionStore"),
+        "warning should point at the fix: {warned}"
     );
 }
 

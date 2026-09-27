@@ -385,6 +385,23 @@ left is a single notification-snapshot clone in Rust (in-place mutation
 landed; the re-sort cost is mostly serializing the key array itself).
 Inserts and removals notify both the row and `order`.
 
+### Choosing a store shape
+
+The boundary charges per byte shipped, so the store shape decides the bill:
+
+| state | use | why |
+| --- | --- | --- |
+| scalar / small object | `atom` / `map` | a write costs well under a microsecond |
+| form with many fields | `map` + `setKey` | one field crosses, not the whole map |
+| burst of writes | `batched` | coalesces to one notification per flush |
+| list of rows | `collection` | a row edit wakes and re-serializes one row |
+| large flat blob through an `atom` | don't | ~0.5 ms per 100 KB write, fresh JS object per change |
+
+Debug builds of the bridge watch for this: a single crossing slower than
+100 µs logs a one-time `console.warn` pointing at the alternatives above
+(`nanostores_wasm::set_boundary_warn_threshold` tunes or disables it;
+release builds compile the check out).
+
 ### Divergences from JS nanostores (v0.1)
 
 - Rust core has no `STORE_UNMOUNT_DELAY` (no portable timer); the JS
